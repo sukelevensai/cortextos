@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync, symlinkSync, lstatSync, unlinkSync } from 'fs';
+import { loadEnabledAgents, saveEnabledAgents } from '../utils/enabled-agents.js';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { OrgContext } from '../types';
@@ -291,12 +292,17 @@ export const addAgentCommand = new Command('add-agent')
     const configDir = join(ctxRoot, 'config');
     mkdirSync(configDir, { recursive: true });
 
-    let enabledAgents: Record<string, any> = {};
+    // GAP-0031: use loadEnabledAgents which throws on parse failure and
+    // quarantines the corrupt file. Previous `catch { /* start fresh */ }`
+    // pattern would reset to {} then overwrite with only this new agent,
+    // silently wiping the existing fleet roster.
+    let enabledAgents;
     try {
-      if (existsSync(enabledPath)) {
-        enabledAgents = JSON.parse(readFileSync(enabledPath, 'utf-8'));
-      }
-    } catch { /* start fresh */ }
+      enabledAgents = loadEnabledAgents(enabledPath);
+    } catch (err) {
+      console.error(`  ${(err as Error).message}`);
+      process.exit(1);
+    }
 
     if (!enabledAgents[name]) {
       enabledAgents[name] = {
@@ -304,7 +310,7 @@ export const addAgentCommand = new Command('add-agent')
         status: 'configured',
         ...(org ? { org } : {}),
       };
-      writeFileSync(enabledPath, JSON.stringify(enabledAgents, null, 2) + '\n', 'utf-8');
+      saveEnabledAgents(enabledPath, enabledAgents);
       console.log(`  Registered in enabled-agents.json`);
     }
 

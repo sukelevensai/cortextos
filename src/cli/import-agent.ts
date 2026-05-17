@@ -6,6 +6,7 @@ import { spawnSync } from 'child_process';
 import { validateAgentName } from '../utils/validate.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { resolvePaths } from '../utils/paths.js';
+import { loadEnabledAgents, saveEnabledAgents } from '../utils/enabled-agents.js';
 
 interface ExportManifest {
   version: string;
@@ -155,15 +156,18 @@ export const importAgentCommand = new Command('import-agent')
     // Register in enabled-agents.json
     const ctxRoot = join(homedir(), '.cortextos', options.instance);
     const enabledPath = join(ctxRoot, 'config', 'enabled-agents.json');
-    let enabledAgents: Record<string, any> = {};
+    // GAP-0031: use loadEnabledAgents — throws + quarantines on parse failure
+    // rather than silently resetting to {} and wiping the existing roster.
+    let enabledAgents;
     try {
-      if (existsSync(enabledPath)) {
-        enabledAgents = JSON.parse(readFileSync(enabledPath, 'utf-8'));
-      }
-    } catch { /* start fresh */ }
+      enabledAgents = loadEnabledAgents(enabledPath);
+    } catch (err) {
+      console.error(`  ${(err as Error).message}`);
+      process.exit(1);
+    }
     enabledAgents[agentName] = { enabled: true, status: 'configured', org };
     mkdirSync(join(ctxRoot, 'config'), { recursive: true });
-    writeFileSync(enabledPath, JSON.stringify(enabledAgents, null, 2) + '\n', 'utf-8');
+    saveEnabledAgents(enabledPath, enabledAgents);
     console.log(`  Registered in enabled-agents.json`);
 
     cleanup(tmpDir);
