@@ -301,14 +301,39 @@ async function main(): Promise<void> {
   }
 
   if (message) {
+    // GAP-0032: fetch() only throws on network failure — Telegram returning
+    // 401 (revoked BOT_TOKEN), 403 (bot blocked), 429 (rate-limited), or 400
+    // (chat_id mismatch) all resolve with res.ok=false and were previously
+    // discarded by `.catch(() => {})`. The crash-alert hook is the last-gasp
+    // page-the-human channel; a wrong/revoked token after a routine rotation
+    // means CRASH alerts vanish forever and the operator never knows.
+    // Record both failure modes to crashes.log (same persistence layer that
+    // wrote the crash event itself, so no new disk-dependency loop).
+    const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
     try {
-      const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-      await fetch(url, {
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text: message }),
       });
-    } catch { /* ignore send failures */ }
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '(no body)');
+        appendFileSync(
+          join(logDir, 'crashes.log'),
+          `[${new Date().toISOString()}] CRASH-ALERT TELEGRAM FAIL status=${res.status} body=${bodyText.slice(0, 200).replace(/\n/g, ' ')}\n` +
+          `  Intended message: ${message.slice(0, 200).replace(/\n/g, ' ')}\n`,
+        );
+      }
+    } catch (err) {
+      // Network failure — distinct from non-2xx above. Record separately so
+      // the operator can tell "Telegram is unreachable" from "Telegram
+      // rejected us".
+      appendFileSync(
+        join(logDir, 'crashes.log'),
+        `[${new Date().toISOString()}] CRASH-ALERT TELEGRAM NETWORK FAIL: ${(err as Error).message}\n` +
+        `  Intended message: ${message.slice(0, 200).replace(/\n/g, ' ')}\n`,
+      );
+    }
   }
 
   // Real-crash agent alerts: notify chief + analyst on crash and daemon-crashed
