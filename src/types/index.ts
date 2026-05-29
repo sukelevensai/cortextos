@@ -175,6 +175,21 @@ export interface AgentConfig {
   /** Context window % at which to inject handoff prompt and hard-restart. Default: 80. */
   ctx_handoff_threshold?: number;
   /**
+   * Minutes a Claude Code session can sit after a Telegram message injection
+   * without firing the Stop hook (last_idle.flag) or sending an outbound
+   * reply before the stuck-thinking watchdog hard-restarts it.
+   *
+   * Default: 15 min. Conservative — covers normal slow thinking on hard
+   * problems while catching genuine hangs within one cron interval.
+   * Set to 0 to disable the watchdog (NOT recommended in production —
+   * stuck sessions block all inbound messages for that agent indefinitely).
+   *
+   * Watchdog implementation: src/daemon/fast-checker.ts:checkSessionProgress.
+   * Uses a separate 3-restarts-in-15min circuit breaker from the context
+   * watchdog so the two failure classes don't share a budget.
+   */
+  stuck_thinking_threshold_min?: number;
+  /**
    * Fallback context window cap (tokens) for codex-app-server agents when the
    * server's `thread/tokenUsage/updated` event reports `modelContextWindow=null`.
    * Defaults to 256000 when unset. Only applied to the codex-app-server runtime.

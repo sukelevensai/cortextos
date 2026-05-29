@@ -92,6 +92,16 @@ if [[ ! -d "$VENV_DIR" ]]; then
   exit 1
 fi
 
+# Resolve platform-specific venv python (Windows uses Scripts/python.exe, POSIX uses bin/python3)
+if [[ -x "$VENV_DIR/Scripts/python.exe" ]]; then
+  VENV_PYTHON="$VENV_DIR/Scripts/python.exe"
+elif [[ -x "$VENV_DIR/bin/python3" ]]; then
+  VENV_PYTHON="$VENV_DIR/bin/python3"
+else
+  echo "ERROR: No python interpreter found in $VENV_DIR (checked Scripts/python.exe and bin/python3). Re-run kb-setup.sh."
+  exit 1
+fi
+
 # Ensure chromadb dir exists
 mkdir -p "$CHROMADB_DIR"
 
@@ -113,7 +123,7 @@ for path in "${PATHS[@]}"; do
   echo "  Source: $path"
 done
 
-"$VENV_DIR/bin/python3" "$MMRAG_PY" ingest "${PATHS[@]}" \
+"$VENV_PYTHON" "$MMRAG_PY" ingest "${PATHS[@]}" \
   --collection "$COLLECTION" \
   ${FORCE}
 

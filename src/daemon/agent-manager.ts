@@ -202,7 +202,7 @@ export class AgentManager {
     const agentEnvFile = join(agentDir, '.env');
     let telegramApi: TelegramAPI | undefined;
     let chatId: string | undefined;
-    let allowedUserId: string | undefined;
+    let allowedUserIds: Set<number> | undefined;
     let botToken: string | undefined;
 
     if (existsSync(agentEnvFile)) {
@@ -212,7 +212,7 @@ export class AgentManager {
       const allowedUserMatch = envContent.match(/^ALLOWED_USER=(.+)$/m);
       botToken = botTokenMatch?.[1]?.trim();
       chatId = chatIdMatch?.[1]?.trim();
-      allowedUserId = allowedUserMatch?.[1]?.trim() || undefined;
+      const allowedUserRaw = allowedUserMatch?.[1]?.trim() || undefined;
 
       // Validate BOT_TOKEN format: must be numeric_id:alphanumeric_secret
       if (botToken && !/^\d+:[A-Za-z0-9_-]+$/.test(botToken)) {
@@ -220,25 +220,29 @@ export class AgentManager {
         botToken = undefined;
       }
 
-      // ALLOWED_USER must be a numeric Telegram user ID, not a username
-      if (allowedUserId && !/^\d+$/.test(allowedUserId)) {
-        log(`SECURITY: ALLOWED_USER is not a numeric ID. Telegram user IDs are numbers (e.g. 123456789). Refusing to enable Telegram. Fix the .env file.`);
-        allowedUserId = undefined;
+      // ALLOWED_USER supports comma-separated numeric Telegram user IDs
+      if (allowedUserRaw) {
+        const parts = allowedUserRaw.split(',').map(s => s.trim()).filter(Boolean);
+        const invalid = parts.filter(p => !/^\d+$/.test(p));
+        if (invalid.length > 0) {
+          log(`SECURITY: ALLOWED_USER contains non-numeric value(s). Telegram user IDs are numbers (e.g. 123456789). Refusing to enable Telegram. Fix the .env file.`);
+        } else if (parts.length > 0) {
+          allowedUserIds = new Set(parts.map(p => parseInt(p, 10)));
+        }
       }
 
       // Security: ALLOWED_USER is REQUIRED when BOT_TOKEN is set. Without it,
       // ANY Telegram user who finds the bot @handle could control the agent.
       // Fail closed: refuse to start Telegram unless the operator explicitly
       // whitelists their numeric user ID.
-      if (botToken && !allowedUserId) {
+      if (botToken && !allowedUserIds) {
         log(`SECURITY: BOT_TOKEN is set but ALLOWED_USER is missing. Refusing to enable Telegram. Set ALLOWED_USER to your numeric Telegram user ID in .env, or remove BOT_TOKEN to start the agent without Telegram.`);
         botToken = undefined;
       }
 
       if (botToken && chatId) {
         telegramApi = new TelegramAPI(botToken);
-        // Don't log sensitive user IDs — just indicate the gate is enabled
-        log(`Telegram configured (chat_id: ****${String(chatId).slice(-4)}, allowed_user: enabled)`);
+        log(`Telegram configured (chat_id: ****${String(chatId).slice(-4)}, allowed_users: ${allowedUserIds?.size ?? 0})`);
       }
     }
 
@@ -253,7 +257,7 @@ export class AgentManager {
       log,
       telegramApi,
       chatId,
-      allowedUserId: allowedUserId ? parseInt(allowedUserId, 10) : undefined,
+      allowedUserIds,
     });
 
     // Send Telegram notification on crashes and session refreshes
@@ -318,10 +322,8 @@ export class AgentManager {
 
       poller.onMessage((msg) => {
         // ALLOWED_USER gate: if configured, ignore messages from other users.
-        // Use numeric comparison to avoid string coercion issues.
-        if (allowedUserId) {
-          const allowedId = parseInt(allowedUserId, 10);
-          if (msg.from?.id !== allowedId) {
+        if (allowedUserIds) {
+          if (!msg.from?.id || !allowedUserIds.has(msg.from.id)) {
             log(`Ignoring message from unauthorized user (allowed_user gate)`);
             return;
           }
@@ -428,9 +430,8 @@ export class AgentManager {
       poller.onReaction((reaction) => {
         // ALLOWED_USER gate: same rule as message handler. If configured,
         // ignore reactions from other users.
-        if (allowedUserId) {
-          const allowedId = parseInt(allowedUserId, 10);
-          if (reaction.user?.id !== allowedId) {
+        if (allowedUserIds) {
+          if (!reaction.user?.id || !allowedUserIds.has(reaction.user.id)) {
             log('Ignoring reaction from unauthorized user (allowed_user gate)');
             return;
           }

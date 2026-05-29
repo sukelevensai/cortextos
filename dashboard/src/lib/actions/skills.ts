@@ -73,7 +73,7 @@ function getInstalledAgents(slug: string): string[] {
     for (const agentEntry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
       if (!agentEntry.isDirectory()) continue;
       const agent = agentEntry.name;
-      const skillPath = path.join(agentsDir, agent, 'skills', slug);
+      const skillPath = path.join(agentsDir, agent, '.claude', 'skills', slug);
       if (fs.existsSync(skillPath)) {
         installed.push(`${org}/${agent}`);
       }
@@ -90,43 +90,88 @@ function getInstalledAgents(slug: string): string[] {
 export async function fetchSkills(): Promise<SkillInfo[]> {
   try {
     const frameworkRoot = getFrameworkRoot();
-    const catalogDir = path.join(frameworkRoot, 'skills');
+    const catalogDirs = [
+      path.join(frameworkRoot, 'skills'),
+      path.join(frameworkRoot, 'community', 'skills'),
+    ];
 
-    if (!fs.existsSync(catalogDir)) {
-      return [];
-    }
-
-    const entries = fs.readdirSync(catalogDir, { withFileTypes: true });
+    const seen = new Set<string>();
     const skills: SkillInfo[] = [];
 
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name.startsWith('.')) continue;
+    for (const catalogDir of catalogDirs) {
+      if (!fs.existsSync(catalogDir)) continue;
+      const entries = fs.readdirSync(catalogDir, { withFileTypes: true });
 
-      const slug = entry.name;
-      const skillMdPath = path.join(catalogDir, slug, 'SKILL.md');
-      const readmePath = path.join(catalogDir, slug, 'README.md');
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith('.')) continue;
 
-      let content = '';
-      if (fs.existsSync(skillMdPath)) {
-        content = fs.readFileSync(skillMdPath, 'utf-8');
-      } else if (fs.existsSync(readmePath)) {
-        content = fs.readFileSync(readmePath, 'utf-8');
+        const slug = entry.name;
+        if (seen.has(slug)) continue;
+        seen.add(slug);
+
+        const skillMdPath = path.join(catalogDir, slug, 'SKILL.md');
+        const readmePath = path.join(catalogDir, slug, 'README.md');
+
+        let content = '';
+        if (fs.existsSync(skillMdPath)) {
+          content = fs.readFileSync(skillMdPath, 'utf-8');
+        } else if (fs.existsSync(readmePath)) {
+          content = fs.readFileSync(readmePath, 'utf-8');
+        }
+
+        const { name, description } = parseSkillMd(content);
+        const installedFor = getInstalledAgents(slug);
+
+        skills.push({
+          slug,
+          name: name || slug,
+          description,
+          installed: installedFor.length > 0,
+          installedFor,
+        });
       }
+    }
 
-      const { name, description } = parseSkillMd(content);
-      const installedFor = getInstalledAgents(slug);
+    const orgsDir = path.join(frameworkRoot, 'orgs');
+    if (fs.existsSync(orgsDir)) {
+      for (const orgEntry of fs.readdirSync(orgsDir, { withFileTypes: true })) {
+        if (!orgEntry.isDirectory()) continue;
+        const agentsDir = path.join(orgsDir, orgEntry.name, 'agents');
+        if (!fs.existsSync(agentsDir)) continue;
+        for (const agentEntry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
+          if (!agentEntry.isDirectory()) continue;
+          const agentSkillsDir = path.join(agentsDir, agentEntry.name, '.claude', 'skills');
+          if (!fs.existsSync(agentSkillsDir)) continue;
+          for (const skillEntry of fs.readdirSync(agentSkillsDir, { withFileTypes: true })) {
+            if (!skillEntry.isDirectory()) continue;
+            const slug = skillEntry.name;
+            if (seen.has(slug)) continue;
+            seen.add(slug);
 
-      if (installedFor.length > 0) {
-        console.log(`[skills] ${slug} installed for: ${installedFor.join(', ')}`);
+            const skillMdPath = path.join(agentSkillsDir, slug, 'SKILL.md');
+            const readmePath = path.join(agentSkillsDir, slug, 'README.md');
+
+            let content = '';
+            if (fs.existsSync(skillMdPath)) {
+              content = fs.readFileSync(skillMdPath, 'utf-8');
+            } else if (fs.existsSync(readmePath)) {
+              content = fs.readFileSync(readmePath, 'utf-8');
+            }
+
+            const { name, description } = parseSkillMd(content);
+            const installedFor = getInstalledAgents(slug);
+
+            skills.push({
+              slug,
+              name: name || slug,
+              description,
+              installed: installedFor.length > 0,
+              installedFor,
+            });
+          }
+        }
       }
-      skills.push({
-        slug,
-        name: name || slug,
-        description,
-        installed: installedFor.length > 0,
-        installedFor,
-      });
     }
 
     return skills.sort((a, b) => a.name.localeCompare(b.name));
@@ -142,9 +187,13 @@ export async function installSkill(
 ): Promise<ActionResult> {
   try {
     const frameworkRoot = getFrameworkRoot();
-    const catalogDir = path.join(frameworkRoot, 'skills', slug);
+    const candidateDirs = [
+      path.join(frameworkRoot, 'skills', slug),
+      path.join(frameworkRoot, 'community', 'skills', slug),
+    ];
+    const catalogDir = candidateDirs.find(d => fs.existsSync(d));
 
-    if (!fs.existsSync(catalogDir)) {
+    if (!catalogDir) {
       return { success: false, error: `Skill not found: ${slug}` };
     }
 
@@ -158,7 +207,7 @@ export async function installSkill(
       return { success: false, error: `Agent not found: ${agent} in org ${org}` };
     }
 
-    const skillsDir = path.join(frameworkRoot, 'orgs', org, 'agents', agent, 'skills');
+    const skillsDir = path.join(frameworkRoot, 'orgs', org, 'agents', agent, '.claude', 'skills');
     fs.mkdirSync(skillsDir, { recursive: true });
 
     const linkPath = path.join(skillsDir, slug);
@@ -188,7 +237,7 @@ export async function uninstallSkill(
   agent: string,
 ): Promise<ActionResult> {
   try {
-    const linkPath = path.join(getFrameworkRoot(), 'orgs', org, 'agents', agent, 'skills', slug);
+    const linkPath = path.join(getFrameworkRoot(), 'orgs', org, 'agents', agent, '.claude', 'skills', slug);
 
     try {
       const stat = fs.lstatSync(linkPath);

@@ -104,6 +104,16 @@ if [[ ! -d "$VENV_DIR" ]]; then
   exit 1
 fi
 
+# Resolve platform-specific venv python (Windows uses Scripts/python.exe, POSIX uses bin/python3)
+if [[ -x "$VENV_DIR/Scripts/python.exe" ]]; then
+  VENV_PYTHON="$VENV_DIR/Scripts/python.exe"
+elif [[ -x "$VENV_DIR/bin/python3" ]]; then
+  VENV_PYTHON="$VENV_DIR/bin/python3"
+else
+  echo "ERROR: No python interpreter found in $VENV_DIR (checked Scripts/python.exe and bin/python3). Re-run kb-setup.sh."
+  exit 1
+fi
+
 export MMRAG_DIR="$KB_ROOT"
 export MMRAG_CHROMADB_DIR="$CHROMADB_DIR"
 export MMRAG_CONFIG="$KB_ROOT/config.json"
@@ -111,7 +121,7 @@ export GEMINI_API_KEY
 
 run_query() {
   local col="$1"
-  "$VENV_DIR/bin/python3" "$MMRAG_PY" query "$QUESTION" \
+  "$VENV_PYTHON" "$MMRAG_PY" query "$QUESTION" \
     --collection "$col" \
     --top-k "$TOP_K" \
     --threshold "$THRESHOLD" \
