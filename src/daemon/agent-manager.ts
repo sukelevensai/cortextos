@@ -352,7 +352,8 @@ export class AgentManager {
             if (!media) {
               log('Media processing returned null - falling back to text format');
               const text = stripControlChars(msg.caption || '');
-              const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot);
+              const linksBlock = FastChecker.formatTelegramLinksBlock(msg);
+              const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot, undefined, undefined, undefined, linksBlock, msg.from?.id);
               if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted);
               return;
             }
@@ -369,15 +370,16 @@ export class AgentManager {
 
             log(`[DEBUG] media.type=${media.type} image_path=${JSON.stringify(relImagePath)} file_path=${JSON.stringify(relFilePath)}`);
             let formatted: string;
+            const linksBlock = FastChecker.formatTelegramLinksBlock(msg);
             if (media.type === 'photo') {
-              formatted = FastChecker.formatTelegramPhotoMessage(from, effectiveChatId, media.text, relImagePath);
+              formatted = FastChecker.formatTelegramPhotoMessage(from, effectiveChatId, media.text, relImagePath, linksBlock);
             } else if (media.type === 'document') {
-              formatted = FastChecker.formatTelegramDocumentMessage(from, effectiveChatId, media.text, relFilePath, media.file_name!);
+              formatted = FastChecker.formatTelegramDocumentMessage(from, effectiveChatId, media.text, relFilePath, media.file_name!, linksBlock);
             } else if (media.type === 'voice' || media.type === 'audio') {
               formatted = FastChecker.formatTelegramVoiceMessage(from, effectiveChatId, relFilePath, media.duration, media.transcript);
             } else {
               // video or video_note
-              formatted = FastChecker.formatTelegramVideoMessage(from, effectiveChatId, media.text, relFilePath, media.file_name || '', media.duration);
+              formatted = FastChecker.formatTelegramVideoMessage(from, effectiveChatId, media.text, relFilePath, media.file_name || '', media.duration, linksBlock);
             }
 
             if (checker.isDuplicate(formatted)) {
@@ -389,7 +391,8 @@ export class AgentManager {
           }).catch((err) => {
             log(`Media processing error: ${err} - falling back to text format`);
             const text = stripControlChars(msg.caption || '');
-            const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot);
+            const linksBlock = FastChecker.formatTelegramLinksBlock(msg);
+            const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot, undefined, undefined, undefined, linksBlock, msg.from?.id);
             if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted);
           });
           return;
@@ -402,6 +405,7 @@ export class AgentManager {
         const replyToText = buildReplyContext(msg.reply_to_message);
 
         const recentHistory = buildRecentHistory(this.ctxRoot, name, effectiveChatId, 6) ?? undefined;
+        const linksBlock = FastChecker.formatTelegramLinksBlock(msg);
         const formatted = FastChecker.formatTelegramTextMessage(
           from,
           effectiveChatId,
@@ -410,6 +414,8 @@ export class AgentManager {
           replyToText,
           lastSent ?? undefined,
           recentHistory,
+          linksBlock,
+          msg.from?.id, // senderId: numeric Telegram user_id, surfaced to defeat display-name spoof
         );
 
         if (checker.isDuplicate(formatted)) {

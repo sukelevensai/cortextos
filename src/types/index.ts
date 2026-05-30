@@ -506,6 +506,7 @@ export interface TelegramMessage {
   from?: TelegramUser;
   chat: TelegramChat;
   text?: string;
+  entities?: TelegramMessageEntity[];
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
   voice?: TelegramVoice;
@@ -513,7 +514,15 @@ export interface TelegramMessage {
   video?: TelegramVideo;
   video_note?: TelegramVideoNote;
   caption?: string;
+  caption_entities?: TelegramMessageEntity[];
   reply_to_message?: TelegramMessage;
+}
+
+export interface TelegramMessageEntity {
+  type: string;
+  offset: number;
+  length: number;
+  url?: string;
 }
 
 export interface TelegramCallbackQuery {

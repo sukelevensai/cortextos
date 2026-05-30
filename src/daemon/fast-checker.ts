@@ -12,6 +12,15 @@ import { KEYS } from '../pty/inject.js';
 import { stripControlChars } from '../utils/validate.js';
 
 type LogFn = (msg: string) => void;
+type TelegramSafeLink = {
+  source: 'text' | 'caption';
+  type: 'url' | 'text_link';
+  text: string;
+  url: string;
+  message_id: number;
+  chat_id: string | number;
+  from_user_id?: number;
+};
 
 /**
  * Fast message checker for a single agent.
@@ -33,7 +42,7 @@ export class FastChecker {
   private frameworkRoot: string;
   private telegramApi?: TelegramAPI;
   private chatId?: string;
-  private allowedUserId?: number;
+  private allowedUserIds?: Set<number>;
 
   // External Telegram handler (set by daemon)
   private telegramMessages: Array<{ formatted: string; ackIds: string[] }> = [];
@@ -59,11 +68,23 @@ export class FastChecker {
   // Persisted to disk so --continue restarts don't reset the circuit breaker
   private ctxCircuitFile: string = '';
 
+  // Stuck-thinking detector state (separate circuit from context-restart so the
+  // two failure classes don't share a 3-restart budget). Triggered when a
+  // message was injected but neither last_idle.flag nor outbound-messages.jsonl
+  // has advanced past the injection timestamp within stuck_thinking_threshold_min.
+  // Default threshold: 15 min. Configurable per-agent via config.json.
+  private stuckCircuitRestarts: number[] = [];
+  private stuckCircuitBrokenAt: number | null = null;
+  private stuckCircuitFile: string = '';
+  // Throttle: only run the stuck check once per 30s to avoid scanning the
+  // outbound jsonl file every 1s poll.
+  private lastStuckCheckAt: number = 0;
+
   constructor(
     agent: AgentProcess,
     paths: BusPaths,
     frameworkRoot: string,
-    options: { pollInterval?: number; log?: LogFn; telegramApi?: TelegramAPI; chatId?: string; allowedUserId?: number } = {},
+    options: { pollInterval?: number; log?: LogFn; telegramApi?: TelegramAPI; chatId?: string; allowedUserIds?: Set<number> } = {},
   ) {
     this.agent = agent;
     this.paths = paths;
@@ -72,7 +93,7 @@ export class FastChecker {
     this.log = options.log || ((msg) => console.log(`[fast-checker/${agent.name}] ${msg}`));
     this.telegramApi = options.telegramApi;
     this.chatId = options.chatId;
-    this.allowedUserId = options.allowedUserId;
+    this.allowedUserIds = options.allowedUserIds;
 
     // Initialize persistent dedup
     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
@@ -81,6 +102,10 @@ export class FastChecker {
     // Load persisted circuit breaker state so --continue restarts don't reset it
     this.ctxCircuitFile = join(paths.stateDir, '.ctx-circuit.json');
     this.loadCtxCircuit();
+
+    // Stuck-thinking circuit: separate file, separate budget.
+    this.stuckCircuitFile = join(paths.stateDir, '.stuck-circuit.json');
+    this.loadStuckCircuit();
   }
 
   /**
@@ -106,14 +131,25 @@ export class FastChecker {
     await this.waitForBootstrap();
     this.log('Bootstrap complete. Beginning poll loop.');
 
-    // Idle-session heartbeat watchdog: fires every 50 min regardless of REPL state
+    // Idle-session heartbeat watchdog: fires every 50 min regardless of REPL state.
+    //
+    // Previously this called execFile('cortextos', ...) which fails ENOENT on
+    // Windows because the daemon spawned by PM2 doesn't inherit a shell PATH
+    // that includes the global npm-link target. Invoke the CLI directly via
+    // process.execPath + dist/cli.js to bypass PATH resolution entirely.
     const HEARTBEAT_INTERVAL_MS = 50 * 60 * 1000;
     const agentName = this.agent.name;
+    const cliPath = join(this.frameworkRoot, 'dist', 'cli.js');
     this.heartbeatTimer = setInterval(() => {
       const ts = new Date().toISOString();
-      execFile('cortextos', ['bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`], (err) => {
-        if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
-      });
+      execFile(
+        process.execPath,
+        [cliPath, 'bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`],
+        { env: { ...process.env, CTX_AGENT: agentName } },
+        (err) => {
+          if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
+        },
+      );
     }, HEARTBEAT_INTERVAL_MS);
 
     while (this.running) {
@@ -211,19 +247,51 @@ export class FastChecker {
 
     // Context monitor: check usage thresholds and fire warnings/handoffs
     await this.checkContextStatus();
+
+    // Stuck-thinking monitor: detect Claude Code sessions that received a
+    // message but stopped making progress (no Stop hook fire, no outbound).
+    // Throttled to once per 30s inside the method.
+    await this.checkSessionProgress();
+  }
+
+  /**
+   * Neutralize frame-marker / fence tokens in UNTRUSTED inbound text (Telegram
+   * message bodies, sender display names, agent-message text) so a crafted
+   * message cannot forge a `=== TELEGRAM from Luke ===` header, break out of the
+   * code fence, or fake a `Reply using:` / tool-output line — and thereby
+   * impersonate the operator or the daemon inside the injected PTY stream.
+   *
+   * (2026-05-30 lantern-command frame-forgery hardening. The incident was
+   * confabulation, not external injection — but the framing path WAS exploitable:
+   * the ``` fence is formatting, not escaping, so attacker text containing ``` or
+   * `===` could break out and forge a frame.)
+   *
+   * Mechanism: insert a zero-width space (U+200B) inside each dangerous token.
+   * Invisible to a human reader; prevents the literal marker from being
+   * reproduced verbatim. Defense-in-depth alongside the existing fence wrapper.
+   */
+  static neutralizeUntrustedText(text: string): string {
+    if (!text) return text;
+    return text
+      .replace(/`{3,}/g, (m) => m.split('').join('\u200b')) // code-fence breakout
+      .replace(/={3,}/g, (m) => m.split('').join('\u200b')) // === frame header/footer markers
+      .replace(/Reply using:/gi, 'Reply\u200b using:'); // action-line marker
   }
 
   /**
    * Format an inbox message for injection.
    * Matches bash fast-checker.sh format exactly.
+   * Untrusted fields (from, text) are frame-marker-neutralized.
    */
   private formatInboxMessage(msg: InboxMessage): string {
     const replyNote = msg.reply_to ? ` [reply_to: ${msg.reply_to}]` : '';
-    return `=== AGENT MESSAGE from ${msg.from}${replyNote} [msg_id: ${msg.id}] ===
+    const safeFrom = FastChecker.neutralizeUntrustedText(String(msg.from ?? ''));
+    const safeText = FastChecker.neutralizeUntrustedText(String(msg.text ?? ''));
+    return `=== AGENT MESSAGE from ${safeFrom}${replyNote} [msg_id: ${msg.id}] ===
 \`\`\`
-${msg.text}
+${safeText}
 \`\`\`
-Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.id}
+Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.id}
 
 `;
   }
@@ -240,33 +308,94 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     replyToText?: string,
     lastSentText?: string,
     recentHistory?: string,
+    linksBlock?: string,
+    senderId?: number | string,
   ): string {
+    // Every free-text field here originates from UNTRUSTED Telegram input (the
+    // sender display name, the message, the replied-to message, the group
+    // history) and is frame-marker-neutralized so none can forge a `=== ... ===`
+    // header, break the code fence, or fake a `Reply using:` line and thereby
+    // impersonate the operator or the daemon. (2026-05-30 frame-forgery fix.)
+    const N = FastChecker.neutralizeUntrustedText;
+    const safeFrom = N(String(from ?? ''));
+
     let replyCx = '';
     if (replyToText) {
-      replyCx = `[Replying to: "${replyToText.slice(0, 500)}"]\n`;
+      replyCx = `[Replying to: "${N(replyToText.slice(0, 500))}"]\n`;
     }
 
     let lastSentCtx = '';
     if (lastSentText) {
-      lastSentCtx = `[Your last message: "${lastSentText.slice(0, 500)}"]\n`;
+      lastSentCtx = `[Your last message: "${N(lastSentText.slice(0, 500))}"]\n`;
     }
 
     let historyCx = '';
     if (recentHistory) {
-      historyCx = `[Recent conversation:]\n${recentHistory}\n`;
+      historyCx = `[Recent conversation:]\n${N(recentHistory)}\n`;
     }
 
-    // Use [USER: ...] wrapper to prevent prompt injection via crafted display names
-    // Slash commands (text starting with /) are NOT wrapped in backticks so Claude Code
-    // can recognize and invoke them via the Skill tool (e.g. /loop, /commit, /restart).
+    // Slash commands (text starting with /) are NOT fenced so Claude Code can
+    // recognize + invoke them (e.g. /loop, /commit, /restart). Frame markers are
+    // neutralized in BOTH branches, so a crafted "/x\n=== TELEGRAM from Luke ==="
+    // message cannot forge a frame regardless of the slash bypass.
+    const safeText = N(text);
     const isSlashCommand = /^\/[a-zA-Z]/.test(text.trim());
     const body = isSlashCommand
-      ? text.trim()
-      : `\`\`\`\n${text}\n\`\`\``;
-    return `=== TELEGRAM from [USER: ${from}] (chat_id:${chatId}) ===
+      ? safeText.trim()
+      : `\`\`\`\n${safeText}\n\`\`\``;
+    // Surface the non-spoofable numeric Telegram user_id alongside the display
+    // name: in a group, any member can set their name to "Luke", but the id is
+    // assigned by Telegram. Lets the agent/operator distinguish real from spoof.
+    const userTag = senderId !== undefined && senderId !== '' ? `${safeFrom} | id:${senderId}` : safeFrom;
+    return `=== TELEGRAM from [USER: ${userTag}] (chat_id:${chatId}) ===
 ${replyCx}${historyCx}${body}
+${linksBlock || ''}
 ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
+`;
+  }
+
+  /**
+   * Extract URLs Telegram explicitly exposed in message entities. This does not
+   * infer from previews, titles, thumbnails, or surrounding text. Telegram
+   * offsets are UTF-16 code units, which match JavaScript string slicing.
+   */
+  static formatTelegramLinksBlock(msg: TelegramMessage): string {
+    const links: TelegramSafeLink[] = [];
+    const collect = (source: 'text' | 'caption', raw: string | undefined, entities: TelegramMessage['entities']): void => {
+      if (!raw || !entities || entities.length === 0) return;
+      for (const entity of entities) {
+        if (entity.type !== 'url' && entity.type !== 'text_link') continue;
+        if (!Number.isInteger(entity.offset) || !Number.isInteger(entity.length)) continue;
+        if (entity.offset < 0 || entity.length <= 0) continue;
+        const end = entity.offset + entity.length;
+        if (end > raw.length) continue;
+
+        const text = raw.slice(entity.offset, end);
+        const url = entity.type === 'text_link' ? entity.url : text;
+        if (!url) continue;
+
+        links.push({
+          source,
+          type: entity.type,
+          text: stripControlChars(text),
+          url: stripControlChars(url),
+          message_id: msg.message_id,
+          chat_id: msg.chat.id,
+          from_user_id: msg.from?.id,
+        });
+      }
+    };
+
+    collect('text', msg.text, msg.entities);
+    collect('caption', msg.caption, msg.caption_entities);
+
+    if (links.length === 0) return '';
+
+    return `telegram_links_extracted_from_entities:
+\`\`\`json
+${JSON.stringify(links, null, 2)}
+\`\`\`
 `;
   }
 
@@ -310,12 +439,14 @@ ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     chatId: string | number,
     caption: string,
     imagePath: string,
+    linksBlock?: string,
   ): string {
     return `=== TELEGRAM PHOTO from ${from} (chat_id:${chatId}) ===
 caption:
 \`\`\`
 ${caption}
 \`\`\`
+${linksBlock || ''}
 local_file: ${imagePath}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
@@ -332,12 +463,14 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     caption: string,
     filePath: string,
     fileName: string,
+    linksBlock?: string,
   ): string {
     return `=== TELEGRAM DOCUMENT from ${from} (chat_id:${chatId}) ===
 caption:
 \`\`\`
 ${caption}
 \`\`\`
+${linksBlock || ''}
 local_file: ${filePath}
 file_name: ${fileName}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
@@ -384,6 +517,7 @@ ${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your repl
     filePath: string,
     fileName: string,
     duration: number | undefined,
+    linksBlock?: string,
   ): string {
     const dur = duration !== undefined ? duration : 'unknown';
     return `=== TELEGRAM VIDEO from ${from} (chat_id:${chatId}) ===
@@ -391,6 +525,7 @@ caption:
 \`\`\`
 ${caption}
 \`\`\`
+${linksBlock || ''}
 duration: ${dur}s
 local_file: ${filePath}
 file_name: ${fileName}
@@ -462,9 +597,9 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     // SECURITY: callbacks must come from the whitelisted user. Identical
     // check to handleCallback — approval clicks are as sensitive as
     // permission clicks and the same gate applies.
-    if (this.allowedUserId !== undefined) {
+    if (this.allowedUserIds !== undefined) {
       const fromUserId = query.from?.id;
-      if (fromUserId !== this.allowedUserId) {
+      if (!fromUserId || !this.allowedUserIds.has(fromUserId)) {
         this.log(`SECURITY: activity-channel callback from unauthorized user ${fromUserId} - rejecting`);
         try { await activityApi.answerCallbackQuery(callbackQueryId, 'Not authorized'); } catch { /* ignore */ }
         return;
@@ -546,9 +681,9 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
     // SECURITY: callbacks must come from the whitelisted user. Without this,
     // anyone who sees a button (forwarded message, group, etc.) could click it.
-    if (this.allowedUserId !== undefined) {
+    if (this.allowedUserIds !== undefined) {
       const fromUserId = query.from?.id;
-      if (fromUserId !== this.allowedUserId) {
+      if (!fromUserId || !this.allowedUserIds.has(fromUserId)) {
         this.log(`SECURITY: callback from unauthorized user ${fromUserId} - rejecting`);
         return;
       }
@@ -1060,6 +1195,150 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     // sessionRefresh() does stop() + start(); shouldContinue() will return false
     // because .force-fresh was just written, giving us a clean fresh session.
     this.agent.sessionRefresh().catch(err => this.log(`Context restart failed: ${err}`));
+  }
+
+  /**
+   * Stuck-thinking detector. Runs on every poll cycle but throttled to once
+   * per 30s. Fires forceStuckRestart when a Telegram message was injected
+   * AND no Stop hook idle flag AND no outbound message has fired since
+   * the injection timestamp for stuck_thinking_threshold_min (default 15 min).
+   *
+   * Why this signal: Claude Code's PTY stdout always grows (spinner animation
+   * = redraws even when stuck), so stdout mtime isn't reliable. last_idle.flag
+   * is written by the Stop hook only when Claude Code completes a turn —
+   * which is exactly the "agent finished thinking" signal we need. outbound
+   * jsonl growth covers the case where the agent replied without firing Stop
+   * (e.g. sent message via cron + then continued working).
+   *
+   * Inbox messages do NOT update lastMessageInjectedAt (see pollCycle), so
+   * cron-injected work doesn't false-positive here either.
+   */
+  private async checkSessionProgress(): Promise<void> {
+    // Bail if no Telegram injection has ever happened — nothing to time out.
+    if (this.lastMessageInjectedAt === 0) return;
+
+    const now = Date.now();
+    // Throttle: scan once per 30s, not every 1s poll.
+    if (now - this.lastStuckCheckAt < 30_000) return;
+    this.lastStuckCheckAt = now;
+
+    // Circuit breaker: if tripped, wait 30 min before re-arming.
+    if (this.stuckCircuitBrokenAt !== null) {
+      if (now - this.stuckCircuitBrokenAt >= 30 * 60_000) {
+        this.stuckCircuitBrokenAt = null;
+        this.stuckCircuitRestarts = [];
+        this.saveStuckCircuit();
+        this.log('Stuck circuit breaker reset after 30min pause');
+      } else {
+        return;
+      }
+    }
+
+    const cfgThresholdMin = this.agent.getConfig().stuck_thinking_threshold_min;
+    const stuckThresholdMs = (typeof cfgThresholdMin === 'number' && cfgThresholdMin > 0
+      ? cfgThresholdMin
+      : 15) * 60_000;
+
+    // Last "progress" signal: Stop hook idle flag mtime OR outbound jsonl mtime.
+    let lastIdleMs = 0;
+    try {
+      const flagPath = join(this.paths.stateDir, 'last_idle.flag');
+      if (existsSync(flagPath)) lastIdleMs = statSync(flagPath).mtimeMs;
+    } catch { /* file unreadable — treat as no progress */ }
+
+    let lastOutboundMs = 0;
+    try {
+      const outboundPath = join(this.paths.logDir, 'outbound-messages.jsonl');
+      if (existsSync(outboundPath)) lastOutboundMs = statSync(outboundPath).mtimeMs;
+    } catch { /* file unreadable — treat as no progress */ }
+
+    const lastProgressMs = Math.max(lastIdleMs, lastOutboundMs);
+
+    // If progress fired AFTER our last injection, the agent finished its turn
+    // (or sent a reply). Not stuck.
+    if (lastProgressMs >= this.lastMessageInjectedAt) return;
+
+    const idleDuration = now - this.lastMessageInjectedAt;
+    if (idleDuration < stuckThresholdMs) return;
+
+    // Confirmed stuck.
+    const idleMin = Math.round(idleDuration / 60_000);
+    this.log(`Stuck-thinking detected: ${idleMin}min since injection with no idle/outbound progress. Force-restarting.`);
+    this.forceStuckRestart(`thinking-stuck for ${idleMin}min`);
+  }
+
+  /**
+   * Restart an agent because its Claude Code session is stuck (detected by
+   * checkSessionProgress). Mirrors forceContextRestart but uses a separate
+   * 3-restarts-in-15min circuit breaker so stuck-restarts don't share a
+   * budget with context-restarts.
+   */
+  private forceStuckRestart(reason: string): void {
+    const now = Date.now();
+
+    // Update + check the stuck circuit window.
+    this.stuckCircuitRestarts = this.stuckCircuitRestarts.filter(t => now - t < 15 * 60_000);
+    if (this.stuckCircuitRestarts.length >= 3) {
+      this.stuckCircuitBrokenAt = now;
+      this.saveStuckCircuit();
+      const msg = `Stuck-restart circuit TRIPPED for ${this.agent.name}: 3 stuck-thinking restarts in 15min. Watchdog paused 30min. Investigate Claude Code session — may be hitting a permanent hang.`;
+      this.log(msg);
+      if (this.telegramApi && this.chatId) {
+        this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
+      }
+      return;
+    }
+    this.stuckCircuitRestarts.push(now);
+    this.saveStuckCircuit();
+
+    // Reset injection timestamp so the new session starts fresh — no false
+    // re-trigger on the next message because we'd be comparing against the
+    // pre-restart timestamp.
+    this.lastMessageInjectedAt = 0;
+    this.lastStuckCheckAt = 0;
+
+    // Hard restart with .force-fresh so the new session is clean (continuing
+    // a stuck session via --continue would just resume the hang).
+    hardRestart(this.paths, this.agent.name, `STUCK-RESTART: ${reason}`);
+
+    // Best-effort Telegram alert so the operator sees the recovery happen
+    // rather than silently noticing only the next reply.
+    if (this.telegramApi && this.chatId) {
+      this.telegramApi.sendMessage(
+        this.chatId,
+        `🩹 Auto-recovery: ${this.agent.name} was stuck thinking (${reason}). Restarting with a fresh session.`,
+      ).catch(() => {});
+    }
+
+    this.agent.sessionRefresh().catch(err => this.log(`Stuck restart failed: ${err}`));
+  }
+
+  /**
+   * Load stuck-circuit state from disk. Parallel to loadCtxCircuit.
+   */
+  private loadStuckCircuit(): void {
+    try {
+      if (!existsSync(this.stuckCircuitFile)) return;
+      const data = JSON.parse(readFileSync(this.stuckCircuitFile, 'utf-8'));
+      this.stuckCircuitRestarts = Array.isArray(data.restarts) ? data.restarts : [];
+      this.stuckCircuitBrokenAt = typeof data.brokenAt === 'number' ? data.brokenAt : null;
+    } catch {
+      // Start fresh on error.
+    }
+  }
+
+  /**
+   * Persist stuck-circuit state after every update.
+   */
+  private saveStuckCircuit(): void {
+    try {
+      writeFileSync(this.stuckCircuitFile, JSON.stringify({
+        restarts: this.stuckCircuitRestarts,
+        brokenAt: this.stuckCircuitBrokenAt,
+      }), 'utf-8');
+    } catch {
+      // Non-critical
+    }
   }
 
   /**
