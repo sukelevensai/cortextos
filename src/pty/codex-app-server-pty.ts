@@ -1,7 +1,9 @@
-import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { randomBytes } from 'crypto';
+import { spawn as spawnChild } from 'child_process';
+import { createConnection } from 'net';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
 import type { TelegramAPI } from '../telegram/api.js';
@@ -17,16 +19,6 @@ interface IPty {
   onExit(callback: (e: { exitCode: number; signal?: number }) => void): { dispose(): void };
   kill(signal?: string): void;
 }
-
-interface IPtySpawnOptions {
-  name?: string;
-  cols?: number;
-  rows?: number;
-  cwd?: string;
-  env?: Record<string, string>;
-}
-
-type SpawnFn = (file: string, args: string[], options: IPtySpawnOptions) => IPty;
 
 interface ThreadState {
   threadId: string;
@@ -103,7 +95,6 @@ export class CodexAppServerPTY {
     reject: (err: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   } | null = null;
-  private _spawnFn: SpawnFn | null = null;
   private _appServerPty: IPty | null = null;
   private _rpc: WsUnixJsonRpcClient | null = null;
   private _onExitHandler: ((exitCode: number, signal?: number) => void) | null = null;
@@ -410,23 +401,49 @@ export class CodexAppServerPTY {
 
   private startAppServer(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      if (!this._spawnFn) {
-        const nodePty = require('node-pty');
-        this._spawnFn = nodePty.spawn;
-      }
-
-      const spawnFn = this._spawnFn!;
-      const pty = spawnFn('codex', [
+      const model = this._config.model || 'gpt-5-codex';
+      const child = spawnChild(this.resolveCodexExecutable(), [
         'app-server',
-        '--enable', 'goals',
+        '-c', `model="${model}"`,
         '--listen', this._socketListenArg,
       ], {
-        name: 'xterm-256color',
-        cols: 200,
-        rows: 50,
         cwd: this._socketCwd,
         env: this.buildEnv(),
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
       });
+
+      const pty: IPty = {
+        pid: child.pid ?? 0,
+        write: (data: string) => {
+          child.stdin?.write(data);
+        },
+        onData: (callback: (data: string) => void) => {
+          const handler = (chunk: Buffer | string) => {
+            callback(Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : String(chunk));
+          };
+          child.stdout?.on('data', handler);
+          child.stderr?.on('data', handler);
+          return {
+            dispose: () => {
+              child.stdout?.off('data', handler);
+              child.stderr?.off('data', handler);
+            },
+          };
+        },
+        onExit: (callback: (e: { exitCode: number; signal?: number }) => void) => {
+          const handler = (code: number | null) => {
+            callback({ exitCode: code ?? 0 });
+          };
+          child.on('exit', handler);
+          return {
+            dispose: () => child.off('exit', handler),
+          };
+        },
+        kill: (signal?: string) => {
+          child.kill(signal as NodeJS.Signals | undefined);
+        },
+      };
 
       this._appServerPty = pty;
       pty.onData((data) => {
@@ -445,15 +462,6 @@ export class CodexAppServerPTY {
 
       this.waitForSocket().then(resolve, reject);
     });
-  }
-
-  private async waitForSocket(timeoutMs = 10000): Promise<void> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (existsSync(this._socketPath)) return;
-      await sleep(100);
-    }
-    throw new Error(`Timed out waiting for app-server socket: ${this._socketPath}`);
   }
 
   private async connectRpc(): Promise<void> {
@@ -871,6 +879,24 @@ export class CodexAppServerPTY {
   }
 
   private resolveSocketPath(): { path: string; listenArg: string; cwd: string } {
+    if (process.platform === 'win32') {
+      const port = 49152 + randomBytes(2).readUInt16BE(0) % 10000;
+      const wsUrl = `ws://127.0.0.1:${port}`;
+      const pointer: SocketPointer = {
+        socketPath: wsUrl,
+        fallback: true,
+        reason: 'windows codex app-server uses localhost websocket transport',
+        updatedAt: new Date().toISOString(),
+      };
+      try {
+        ensureDir(this._stateDir);
+        writeFileSync(this._socketPointerPath, `${JSON.stringify(pointer, null, 2)}\n`, 'utf-8');
+      } catch {
+        // Non-fatal; spawn will still use the websocket listener.
+      }
+      return { path: wsUrl, listenArg: wsUrl, cwd: this._stateDir };
+    }
+
     const defaultPath = join(this._stateDir, SOCKET_BASENAME);
     if (Buffer.byteLength(defaultPath) < SOCKET_PATH_WARN_BYTES) {
       return { path: defaultPath, listenArg: `unix://./${SOCKET_BASENAME}`, cwd: this._stateDir };
@@ -894,6 +920,7 @@ export class CodexAppServerPTY {
   }
 
   private removeSocket(): void {
+    if (this._socketPath.startsWith('ws://')) return;
     try {
       if (existsSync(this._socketPath)) unlinkSync(this._socketPath);
     } catch {
@@ -928,6 +955,114 @@ export class CodexAppServerPTY {
     if (now - this._typingLastSent < 4000) return;
     this._typingLastSent = now;
     this._telegramApi.sendChatAction(this._chatId, 'typing').catch(() => { /* non-fatal */ });
+  }
+
+  private resolveCodexExecutable(): string {
+    if (process.platform !== 'win32') return 'codex';
+
+    const pathDirs = (process.env.PATH || '').split(';').filter(Boolean);
+    const roamingNpm = process.env.APPDATA ? join(process.env.APPDATA, 'npm') : null;
+    const localCodexBin = process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin') : null;
+    const candidates: string[] = [];
+
+    if (localCodexBin && existsSync(localCodexBin)) {
+      try {
+        const localCandidates = readdirSync(localCodexBin, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => join(localCodexBin, entry.name, 'codex.exe'))
+          .filter((candidate) => existsSync(candidate))
+          .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+        candidates.push(...localCandidates);
+      } catch {
+        // Fall back to npm/PATH candidates below.
+      }
+    }
+
+    if (roamingNpm) {
+      candidates.push(join(
+        roamingNpm,
+        'node_modules',
+        '@openai',
+        'codex',
+        'node_modules',
+        '@openai',
+        'codex-win32-x64',
+        'vendor',
+        'x86_64-pc-windows-msvc',
+        'bin',
+        'codex.exe',
+      ));
+      candidates.push(join(
+        roamingNpm,
+        'node_modules',
+        '@openai',
+        'codex',
+        'node_modules',
+        '@openai',
+        'codex-win32-x64',
+        'vendor',
+        'x86_64-pc-windows-msvc',
+        'codex',
+        'codex.exe',
+      ));
+      candidates.push(join(roamingNpm, 'codex.cmd'));
+      candidates.push(join(roamingNpm, 'codex.bat'));
+    }
+
+    for (const dir of pathDirs) {
+      candidates.push(join(dir, 'codex.cmd'));
+    }
+    for (const dir of pathDirs) {
+      candidates.push(join(dir, 'codex.bat'));
+    }
+    for (const dir of pathDirs) {
+      if (!dir.toLowerCase().includes('windowsapps')) {
+        candidates.push(join(dir, 'codex.exe'));
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+
+    return 'codex.cmd';
+  }
+
+  private async waitForSocket(timeoutMs = 10000): Promise<void> {
+    if (!this._socketPath.startsWith('ws://')) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (existsSync(this._socketPath)) return;
+        await sleep(100);
+      }
+      throw new Error(`Timed out waiting for app-server socket: ${this._socketPath}`);
+    }
+
+    const url = new URL(this._socketPath);
+    const host = url.hostname;
+    const port = Number(url.port);
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const reachable = await new Promise<boolean>((resolve) => {
+        const socket = createConnection({ host, port });
+        const timer = setTimeout(() => {
+          socket.destroy();
+          resolve(false);
+        }, 500);
+        socket.once('connect', () => {
+          clearTimeout(timer);
+          socket.end();
+          resolve(true);
+        });
+        socket.once('error', () => {
+          clearTimeout(timer);
+          resolve(false);
+        });
+      });
+      if (reachable) return;
+      await sleep(100);
+    }
+    throw new Error(`Timed out waiting for app-server websocket: ${this._socketPath}`);
   }
 
   private buildEnv(): Record<string, string> {

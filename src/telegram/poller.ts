@@ -24,6 +24,18 @@ export class TelegramPoller {
   private pollInterval: number;
 
   /**
+   * Reason the most recent start() returned. Wrappers around start() (e.g. the
+   * agent-manager's restart-on-Conflict loop) use this to decide whether to
+   * restart the poller or honor an intentional stop.
+   *
+   * - 'never-started': poller never ran (constructed but start() not called)
+   * - 'stopped-externally': stop() was called from outside (stopAgent path)
+   * - 'conflict-self-die': caught a Telegram Conflict and yielded the lock
+   * - 'unknown-exit': running flipped false through some other path (defensive)
+   */
+  public lastExitReason: 'never-started' | 'stopped-externally' | 'conflict-self-die' | 'unknown-exit' = 'never-started';
+
+  /**
    * @param api Telegram API client scoped to a single bot token.
    * @param stateDir Directory for persisted poller state (offset, dedup).
    * @param pollInterval Milliseconds between getUpdates calls.
@@ -76,15 +88,34 @@ export class TelegramPoller {
    */
   async start(): Promise<void> {
     this.running = true;
+    this.lastExitReason = 'unknown-exit';
     while (this.running) {
       try {
         await this.pollOnce();
       } catch (err) {
-        // Log error but continue polling
+        // Conflict-self-die: Telegram rejects duplicate getUpdates with
+        // "Conflict: terminated by other getUpdates request". This happens
+        // when two pollers (or two daemons) hold the same BOT_TOKEN — once we
+        // hit it, we cannot ever recover by retrying because the OTHER
+        // instance keeps winning. Self-terminate so the survivor takes over;
+        // a wrapper above start() (agent-manager restart loop) will respawn
+        // us after ~30s once the Telegram lock releases. Without self-die,
+        // the loser retries every pollInterval forever, jamming both pollers
+        // in a mutual Conflict standoff and starving the inbound message queue.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('Conflict:') || msg.includes('terminated by other getUpdates')) {
+          console.error('[telegram-poller] Conflict detected — self-terminating to yield to other poller');
+          this.running = false;
+          this.lastExitReason = 'conflict-self-die';
+          return;
+        }
+        // Log other errors but continue polling
         console.error('[telegram-poller] Poll error:', err);
       }
       await sleep(this.pollInterval);
     }
+    // While-loop exited cleanly. If stop() ran, lastExitReason is already
+    // 'stopped-externally'. Otherwise leave as 'unknown-exit' (set above).
   }
 
   /**
@@ -92,6 +123,7 @@ export class TelegramPoller {
    */
   stop(): void {
     this.running = false;
+    this.lastExitReason = 'stopped-externally';
   }
 
   /**

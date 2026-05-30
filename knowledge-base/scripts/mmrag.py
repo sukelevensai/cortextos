@@ -168,11 +168,27 @@ def load_config():
 
 
 def get_api_key(config):
+    """Backwards-compatible Gemini key getter (used by media paths)."""
     key = os.environ.get("GEMINI_API_KEY") or config.get("gemini_api_key")
     if not key:
         print("ERROR: No Gemini API key. Set GEMINI_API_KEY or run setup.")
         sys.exit(1)
     return key
+
+
+def get_embedding_provider(config):
+    """Returns 'gemini' or 'openai'. Config override possible; default gemini."""
+    return (config.get("embedding_provider") or os.environ.get("EMBEDDING_PROVIDER") or "gemini").lower()
+
+
+def get_openai_client():
+    """Construct an OpenAI client. Reads OPENAI_API_KEY from env."""
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        print("ERROR: No OpenAI API key. Set OPENAI_API_KEY in env (or org secrets.env).")
+        sys.exit(1)
+    from openai import OpenAI
+    return OpenAI(api_key=key)
 
 # ---------------------------------------------------------------------------
 # Gemini clients
@@ -248,7 +264,41 @@ def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45)):
 
 
 def embed_content(client, config, content, task_type="RETRIEVAL_DOCUMENT"):
-    """Embed content using Gemini Embedding 2. Content can be text string or list of Parts."""
+    """Embed content. Dispatches by `embedding_provider` config ('gemini' or 'openai').
+
+    Gemini path supports multimodal Parts (text + media bytes). OpenAI path is
+    text-only — if `content` is a list of Parts, OpenAI raises an error so the
+    caller can fall back to Gemini for media (only relevant for PDF / image /
+    video ingest paths, not the text/markdown text path).
+    """
+    provider = get_embedding_provider(config)
+
+    if provider == "openai":
+        # OpenAI accepts strings or list[str]; not bytes. Reject Parts.
+        if not isinstance(content, str):
+            if isinstance(content, list) and all(isinstance(p, str) for p in content):
+                input_payload = content
+            else:
+                raise ValueError(
+                    "OpenAI embeddings provider does not support multimodal Parts. "
+                    "Set embedding_provider='gemini' for media ingest, or "
+                    "use text-only inputs."
+                )
+        else:
+            input_payload = content
+
+        openai_client = client if client is not None and hasattr(client, "embeddings") else get_openai_client()
+        result = openai_client.embeddings.create(
+            model=config.get("embedding_model_openai", "text-embedding-3-large"),
+            input=input_payload,
+            dimensions=config.get("embedding_dimensions", DEFAULT_EMBEDDING_DIMENSIONS),
+        )
+        if _tracker:
+            _tracker.track_embedding(content)
+        # OpenAI returns a list when input is a list. Return first embedding to match Gemini shape.
+        return result.data[0].embedding
+
+    # Default: Gemini path (preserves original behavior byte-for-byte)
     from google.genai import types
     result = client.models.embed_content(
         model=config.get("embedding_model", "gemini-embedding-2-preview"),
@@ -1073,7 +1123,14 @@ def cmd_ingest(args):
     _tracker = UsageTracker("ingest")
 
     config = load_config()
-    client = get_genai_client(get_api_key(config))
+    # Provider-aware client. For openai, skip Gemini bootstrap entirely so users
+    # without GEMINI_API_KEY can still ingest text. embed_content auto-creates
+    # an OpenAI client on first call. Media ingest (PDF/audio/video) still
+    # requires Gemini and will error clearly if GEMINI_API_KEY is missing.
+    if get_embedding_provider(config) == "openai":
+        client = get_openai_client()
+    else:
+        client = get_genai_client(get_api_key(config))
     collection_name = args.collection or config.get("default_collection", "default")
     collection = get_chroma_collection(collection_name)
 
@@ -1155,7 +1212,11 @@ def cmd_query(args):
     _tracker = UsageTracker("query")
 
     config = load_config()
-    client = get_genai_client(get_api_key(config))
+    # Provider-aware client (matches cmd_ingest behavior)
+    if get_embedding_provider(config) == "openai":
+        client = get_openai_client()
+    else:
+        client = get_genai_client(get_api_key(config))
     collection_name = args.collection or config.get("default_collection", "default")
     collection = get_chroma_collection(collection_name)
 

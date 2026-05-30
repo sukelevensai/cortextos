@@ -24,6 +24,58 @@ import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
+import { evaluateTelegramEgress } from '../bus/egress-guard.js';
+
+/**
+ * EGRESS-LOCK enforcement for outbound Telegram destinations (2026-05-30
+ * lantern-command confabulation incident). Refuses + logs a critical SECURITY
+ * event + alerts the orchestrator + exits non-zero if `chatId` is not on the
+ * agent's allow-list. Shared by every CLI path that targets a chat_id, so a
+ * confused/injected agent cannot exfiltrate to a stranger from ANY send path.
+ */
+function enforceTelegramEgress(chatId: string, env: ReturnType<typeof resolveEnv>): void {
+  const orgDir = env.frameworkRoot && env.org ? join(env.frameworkRoot, 'orgs', env.org) : undefined;
+  const egress = evaluateTelegramEgress(chatId, { agentDir: env.agentDir, orgDir });
+  if (!egress.allowed) {
+    console.error(
+      `SECURITY: refusing Telegram send — ${egress.reason}. Allowed: [${egress.allowList.join(', ')}]. ` +
+        `If this destination is legitimate, add it to TELEGRAM_OUTBOUND_ALLOWED in the agent .env.`,
+    );
+    try {
+      if (env.agentName && env.org) {
+        const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+        logEvent(
+          paths,
+          env.agentName,
+          env.org,
+          'error',
+          'egress_blocked',
+          'critical',
+          JSON.stringify({ chat_id: String(chatId), allow_list: egress.allowList }),
+        );
+        const orchestrator = process.env.CTX_ORCHESTRATOR_AGENT;
+        if (orchestrator) {
+          sendMessage(
+            paths,
+            env.agentName,
+            orchestrator,
+            'urgent',
+            `EGRESS-BLOCK: ${env.agentName} attempted a Telegram send to ${String(chatId)} which is NOT on its allow-list. Refused. If legitimate, add it to TELEGRAM_OUTBOUND_ALLOWED in that agent's .env.`,
+          );
+        }
+      }
+    } catch {
+      /* logging/alerting is best-effort; the block itself already took effect */
+    }
+    process.exit(1);
+  }
+  if (egress.unresolved) {
+    console.error(
+      `WARNING: egress allow-list could not be resolved for ${env.agentName || 'this agent'} — ` +
+        `sending WITHOUT egress enforcement. Set CHAT_ID/ALLOWED_USER in the agent .env to enable the lock.`,
+    );
+  }
+}
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
 
 /**
@@ -458,12 +510,40 @@ busCommand
       }
     }
 
+    // Read agent config.json for timezone + day-mode boundaries so the bus
+    // command auto-detects mode correctly even when --timezone is omitted and
+    // the CTX_TIMEZONE env var fails to propagate from the PTY (Windows quirk).
+    let configTimezone: string | undefined;
+    let configDayStart: string | undefined;
+    let configDayEnd: string | undefined;
+    if (frameworkRoot) {
+      const configPaths = [
+        join(frameworkRoot, 'orgs', env.org, 'agents', env.agentName, 'config.json'),
+        join(frameworkRoot, 'agents', env.agentName, 'config.json'),
+      ];
+      for (const cfgPath of configPaths) {
+        if (existsSync(cfgPath)) {
+          try {
+            const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+            if (typeof cfg.timezone === 'string') configTimezone = cfg.timezone;
+            if (typeof cfg.day_mode_start === 'string') configDayStart = cfg.day_mode_start;
+            if (typeof cfg.day_mode_end === 'string') configDayEnd = cfg.day_mode_end;
+          } catch {
+            // Skip — fall back to env / defaults
+          }
+          break;
+        }
+      }
+    }
+
     updateHeartbeat(paths, env.agentName, status, {
       org: env.org,
-      timezone: opts.timezone,
+      timezone: opts.timezone || configTimezone,
       loopInterval: opts.interval,
       currentTask: opts.task,
       displayName,
+      dayStart: configDayStart,
+      dayEnd: configDayEnd,
     });
     // Auto-emit a heartbeat event so the activity feed surfaces any live agent
     // even if the agent itself forgets to call log-event. This makes the
@@ -983,6 +1063,9 @@ busCommand
       process.exit(1);
     }
 
+    // EGRESS-LOCK: refuse sends to any chat_id not on the agent's allow-list.
+    enforceTelegramEgress(chatId, env);
+
     const api = new TelegramAPI(botToken);
     try {
       let sentMessageId = 0;
@@ -1261,6 +1344,9 @@ busCommand
       console.error('Error: BOT_TOKEN not configured. Set it in your agent .env file or as an environment variable to enable Telegram.');
       process.exit(1);
     }
+
+    // EGRESS-LOCK: editing a message targets a chat_id like a send; gate it too.
+    enforceTelegramEgress(chatId, env);
 
     const api = new TelegramAPI(botToken);
     let markup: object | undefined;

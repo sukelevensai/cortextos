@@ -46,12 +46,18 @@ export class WsUnixJsonRpcClient {
   private pending = new Map<number | string, PendingRequest>();
   private handlers: MessageHandler[] = [];
 
-  constructor(private readonly socketPath: string) {}
+  constructor(private readonly endpoint: string) {}
 
   async connect(): Promise<void> {
     if (this.socket) return;
 
-    const socket = createConnection(this.socketPath);
+    const wsUrl = this.endpoint.startsWith('ws://') ? new URL(this.endpoint) : null;
+    const socket = wsUrl
+      ? createConnection({
+          host: wsUrl.hostname,
+          port: Number(wsUrl.port),
+        })
+      : createConnection(this.endpoint);
     await new Promise<void>((resolve, reject) => {
       socket.once('connect', resolve);
       socket.once('error', reject);
@@ -60,7 +66,7 @@ export class WsUnixJsonRpcClient {
     const key = randomBytes(16).toString('base64');
     socket.write([
       'GET / HTTP/1.1',
-      'Host: localhost',
+      `Host: ${wsUrl ? wsUrl.host : 'localhost'}`,
       'Upgrade: websocket',
       'Connection: Upgrade',
       `Sec-WebSocket-Key: ${key}`,
@@ -88,7 +94,7 @@ export class WsUnixJsonRpcClient {
     socket.on('data', (chunk) => this.parseFrames(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
     socket.on('error', (err) => this.rejectAll(err));
     socket.on('close', () => {
-      this.rejectAll(new Error('WebSocket Unix socket closed'));
+      this.rejectAll(new Error('WebSocket connection closed'));
       this.socket = null;
     });
 
@@ -107,7 +113,7 @@ export class WsUnixJsonRpcClient {
         socket.destroy();
       }
     }
-    this.rejectAll(new Error('WebSocket Unix socket closed'));
+    this.rejectAll(new Error('WebSocket connection closed'));
   }
 
   onMessage(handler: MessageHandler): () => void {
@@ -119,7 +125,7 @@ export class WsUnixJsonRpcClient {
 
   request<T = unknown>(method: string, params?: unknown, timeoutMs = 30000): Promise<JsonRpcResponse<T>> {
     if (!this.socket || this.socket.destroyed) {
-      return Promise.reject(new Error('WebSocket Unix socket is not connected'));
+      return Promise.reject(new Error('WebSocket connection is not connected'));
     }
 
     const id = this.nextId++;
@@ -152,7 +158,7 @@ export class WsUnixJsonRpcClient {
 
   private send(message: JsonRpcMessage): void {
     if (!this.socket || this.socket.destroyed) {
-      throw new Error('WebSocket Unix socket is not connected');
+      throw new Error('WebSocket connection is not connected');
     }
     this.socket.write(this.encodeFrame(`${JSON.stringify(message)}\n`));
   }

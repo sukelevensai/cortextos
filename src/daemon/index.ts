@@ -230,6 +230,33 @@ function handleFatal(
   doExit: boolean,
 ): void {
   const errStr = err instanceof Error ? (err.stack || err.message) : String(err);
+
+  // Windows-only benign crash filter: node-pty's conpty helper
+  // (conpty_console_list_agent.js) synchronously calls Windows AttachConsole()
+  // when a PTY child dies. If shellPid is gone (PTY cleanup race),
+  // AttachConsole throws "AttachConsole failed" and the throw surfaces as
+  // an uncaughtException in the daemon process. The PTY data path itself
+  // is fine — only the process-enumeration helper failed. Exiting here
+  // would put the daemon in a PM2 respawn loop that breaks every agent
+  // (Telegram pollers get Conflict-locked, BUG-011 alarm spams, etc).
+  //
+  // Treat this specific failure as recoverable: log it, skip the exit,
+  // and let the daemon keep running. Other uncaughtExceptions still exit.
+  if (
+    process.platform === 'win32' &&
+    err instanceof Error &&
+    typeof err.message === 'string' &&
+    err.message.includes('AttachConsole failed')
+  ) {
+    console.error(`[daemon] ${tag} — benign node-pty conpty cleanup race ("AttachConsole failed"). Continuing without exit.`);
+    // Still record so we have visibility if this becomes a hotspot,
+    // but don't write .daemon-crashed markers and don't alert the operator.
+    try {
+      recordCrash(ctxRoot, `[recovered] ${errStr}`);
+    } catch { /* best effort */ }
+    return;
+  }
+
   console.error(`[daemon] FATAL ${tag} — exiting for PM2 respawn`);
   console.error(errStr);
 

@@ -234,16 +234,55 @@ function sleep(ms: number): Promise<void> {
 // CronScheduler
 // ---------------------------------------------------------------------------
 
+/**
+ * Severity vocabulary for `onEvent` callbacks.
+ * Mirrors the runtime-validated EventSeverity union in src/types so the
+ * daemon-side wiring can pass it through to `logEvent` without translation.
+ */
+export type CronSchedulerEventSeverity = 'info' | 'warning' | 'error';
+
+/**
+ * Structured event emitter for cron-scheduler internal state changes that
+ * were previously logged only to PM2 stdout. The daemon wires this to
+ * `logEvent(...)` so the dashboard activity feed surfaces silent failures.
+ *
+ * GAP-0006 (2026-05-16): four sites in `loadCrons` / `tick` historically
+ * emitted only via `this.logger(...)` when a schedule was unparseable, the
+ * crons file was corrupt, or a cron was removed after a fire/dispatch
+ * failure. Operators had no signal until they spelunked PM2 logs.
+ *
+ * The callback is intentionally lightweight (event name + severity + meta).
+ * The daemon translates this to a `cron`-category event via `logEvent` with
+ * the agent's resolved paths + org.
+ */
+export type CronSchedulerEventEmitter = (
+  event: string,
+  severity: CronSchedulerEventSeverity,
+  meta?: Record<string, unknown>,
+) => void;
+
 export interface CronSchedulerOptions {
   agentName: string;
   onFire: (cron: CronDefinition) => Promise<void> | void;
   logger?: (msg: string) => void;
+  /**
+   * Optional structured-event emitter. When provided, the scheduler fires it
+   * alongside `logger(...)` at every silent-failure site introduced by
+   * GAP-0006. Leave undefined to preserve legacy log-only behaviour.
+   */
+  onEvent?: CronSchedulerEventEmitter;
 }
 
 export class CronScheduler {
   private readonly agentName: string;
   private readonly onFire: (cron: CronDefinition) => Promise<void> | void;
   private readonly logger: (msg: string) => void;
+  /**
+   * Optional structured-event emitter (GAP-0006). Daemon wires this to
+   * `logEvent(...)` so silent failures surface in the dashboard activity feed.
+   * Undefined preserves legacy log-only behaviour for tests that don't need it.
+   */
+  private readonly onEvent: CronSchedulerEventEmitter | undefined;
 
   /** In-memory schedule, keyed by cron name. */
   private scheduled: Map<string, ScheduledCron> = new Map();
@@ -271,6 +310,28 @@ export class CronScheduler {
     this.agentName = opts.agentName;
     this.onFire    = opts.onFire;
     this.logger    = opts.logger ?? ((msg: string) => process.stdout.write(msg + '\n'));
+    this.onEvent   = opts.onEvent;
+  }
+
+  /**
+   * Emit a structured event (GAP-0006). Wrapped so a caller-side throw in the
+   * `onEvent` callback can never abort the scheduler tick or load path that
+   * called us. Mirrors the swallow-and-log discipline used elsewhere in this
+   * file for `updateCron` persistence failures.
+   */
+  private safeEmit(
+    event: string,
+    severity: CronSchedulerEventSeverity,
+    meta?: Record<string, unknown>,
+  ): void {
+    if (!this.onEvent) return;
+    try {
+      this.onEvent(event, severity, meta);
+    } catch (err) {
+      this.logger(
+        `[cron-scheduler] WARNING: onEvent("${event}") threw — ${err instanceof Error ? err.message : String(err)}. Continuing.`
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -287,7 +348,20 @@ export class CronScheduler {
       return;
     }
     this.loadCrons(/* isReload */ false);
-    this.tickHandle = setInterval(() => void this.tick(), CronScheduler.TICK_INTERVAL_MS);
+    // Wrap tick() in try/catch so a single throwing tick (e.g. crons.json
+    // mid-read corruption, transient handler bug) doesn't kill the whole
+    // interval. Without this, an unhandled tick exception silently halts
+    // ALL cron execution for this agent — agent looks healthy in PM2 but
+    // fires no crons. The audit (2026-05-16) flagged this as the same
+    // failure class as the .env BOM bug: silent feature-disablement.
+    const safeTick = async () => {
+      try {
+        await this.tick();
+      } catch (err) {
+        this.logger(`[cron-scheduler] tick error (continuing): ${(err as Error)?.message || err}`);
+      }
+    };
+    this.tickHandle = setInterval(() => void safeTick(), CronScheduler.TICK_INTERVAL_MS);
     this.logger(`[cron-scheduler] started for agent "${this.agentName}" with ${this.scheduled.size} cron(s)`);
   }
 
@@ -402,6 +476,13 @@ export class CronScheduler {
         this.logger(
           `[cron-scheduler] WARNING: cannot parse schedule "${def.schedule}" for cron "${def.name}" — skipping`
         );
+        // GAP-0006: silent skip previously logged only to PM2 stdout. Emit
+        // a structured event so the dashboard activity feed surfaces it.
+        this.safeEmit('cron_schedule_unparseable', 'warning', {
+          cron_name: def.name,
+          schedule: def.schedule,
+          phase: 'load',
+        });
         continue;
       }
 
@@ -440,6 +521,13 @@ export class CronScheduler {
         `[cron-scheduler] WARNING: reload produced empty schedule for agent "${this.agentName}" — ` +
         `retaining last-good schedule (${this.lastGoodSchedule.size} cron(s)) until file is repaired`
       );
+      // GAP-0006: surface corrupt-file fallback to the dashboard so operators
+      // know the on-disk crons.json is broken (and remains broken until fixed).
+      this.safeEmit('cron_file_corrupt_fallback', 'error', {
+        agent: this.agentName,
+        retained_count: this.lastGoodSchedule.size,
+        phase: 'reload',
+      });
       this.scheduled = new Map(this.lastGoodSchedule);
       return;
     }
@@ -518,6 +606,15 @@ export class CronScheduler {
           // Unrecognised schedule after fire — remove from schedule to avoid infinite loops
           this.scheduled.delete(name);
           this.logger(`[cron-scheduler] WARNING: removed "${name}" from schedule after fire — schedule unparseable`);
+          // GAP-0006: cron just successfully fired but its schedule no longer
+          // parses — definition was mutated between fires. Without an event
+          // emission the cron silently stops firing and operators have no
+          // signal until they notice the missing recurring work.
+          this.safeEmit('cron_removed_post_fire_unparseable', 'error', {
+            cron_name: name,
+            schedule: cron.schedule,
+            phase: 'tick_post_fire',
+          });
           continue; // sc is gone, skip clearing firing flag
         }
       } else {
@@ -535,6 +632,15 @@ export class CronScheduler {
         } else {
           this.scheduled.delete(name);
           this.logger(`[cron-scheduler] WARNING: removed "${name}" from schedule after failure — schedule unparseable`);
+          // GAP-0006: dispatch failed AND the schedule no longer parses, so
+          // we cannot advance to a next slot. Emit so the dashboard catches
+          // the dropped cron — without this the operator only sees "no fires
+          // happening" with no surface to investigate.
+          this.safeEmit('cron_removed_post_failure_unparseable', 'error', {
+            cron_name: name,
+            schedule: cron.schedule,
+            phase: 'tick_post_failure',
+          });
           continue;
         }
       }
