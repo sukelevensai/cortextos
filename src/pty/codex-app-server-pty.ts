@@ -493,22 +493,19 @@ export class CodexAppServerPTY {
       }
     }
 
-    if (mode === 'continue') {
-      const latest = await this.findLatestThreadForCwd();
-      if (latest) {
-        const resumed = await this.request<ThreadResponse>('thread/resume', {
-          threadId: latest,
-          cwd: this._cwd,
-          ...THREAD_PERMISSION_OVERRIDES,
-          config: { features: { goals: true } },
-          excludeTurns: true,
-          persistExtendedHistory: true,
-        });
-        this.setThreadId(resumed.result?.thread.id || latest);
-        return;
-      }
-    }
-
+    // GAP-0068 (identity-bleed fix): on persisted-resume failure (or no persisted
+    // state) we deliberately do NOT fall back to the most-recent thread for this
+    // cwd. codex partitions threads by cwd ONLY (no agent-ownership field), so in a
+    // shared working_directory that fallback would adopt whichever SIBLING agent was
+    // most-recently active — the agent would resume a sibling's conversation and
+    // believe it IS the sibling (the 2026-05-30 lantern CFO-identity incident: a
+    // failed-resume jay-sidekick adopted the CFO thread and announced "Lantern CFO
+    // is back online"). The agent's OWN continuity comes from the per-agent
+    // persisted-thread path above; when that is unavailable we start a FRESH thread
+    // (safe — the agent reloads from its durable memory) rather than risk
+    // cross-identity adoption. `mode` is intentionally not branched on here: the
+    // start-fresh fallthrough is correct for both modes (#437 keeps the per-agent
+    // persisted-resume in both modes; that path is agent-owned and unaffected).
     const started = await this.request<ThreadResponse>('thread/start', {
       cwd: this._cwd,
       ...THREAD_PERMISSION_OVERRIDES,
@@ -518,17 +515,6 @@ export class CodexAppServerPTY {
       persistExtendedHistory: true,
     });
     this.setThreadId(started.result!.thread.id);
-  }
-
-  private async findLatestThreadForCwd(): Promise<string | null> {
-    const response = await this.request<{ data: Array<{ id: string; cwd?: string }> }>('thread/list', {
-      cwd: this._cwd,
-      limit: 1,
-      sortKey: 'updated_at',
-      sortDirection: 'desc',
-      archived: false,
-    });
-    return response.result?.data?.[0]?.id || null;
   }
 
   private queueTurn(input: unknown[]): void {
