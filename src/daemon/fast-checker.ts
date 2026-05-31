@@ -12,6 +12,15 @@ import { KEYS } from '../pty/inject.js';
 import { stripControlChars } from '../utils/validate.js';
 
 type LogFn = (msg: string) => void;
+type TelegramSafeLink = {
+  source: 'text' | 'caption';
+  type: 'url' | 'text_link';
+  text: string;
+  url: string;
+  message_id: number;
+  chat_id: string | number;
+  from_user_id?: number;
+};
 
 /**
  * Fast message checker for a single agent.
@@ -214,16 +223,43 @@ export class FastChecker {
   }
 
   /**
+   * Neutralize frame-marker / fence tokens in UNTRUSTED inbound text (Telegram
+   * message bodies, sender display names, agent-message text) so a crafted
+   * message cannot forge a `=== TELEGRAM from Luke ===` header, break out of the
+   * code fence, or fake a `Reply using:` / tool-output line — and thereby
+   * impersonate the operator or the daemon inside the injected PTY stream.
+   *
+   * (2026-05-30 lantern-command frame-forgery hardening. The incident was
+   * confabulation, not external injection — but the framing path WAS exploitable:
+   * the ``` fence is formatting, not escaping, so attacker text containing ``` or
+   * `===` could break out and forge a frame.)
+   *
+   * Mechanism: insert a zero-width space (U+200B) inside each dangerous token.
+   * Invisible to a human reader; prevents the literal marker from being
+   * reproduced verbatim. Defense-in-depth alongside the existing fence wrapper.
+   */
+  static neutralizeUntrustedText(text: string): string {
+    if (!text) return text;
+    return text
+      .replace(/`{3,}/g, (m) => m.split('').join('\u200b')) // code-fence breakout
+      .replace(/={3,}/g, (m) => m.split('').join('\u200b')) // === frame header/footer markers
+      .replace(/Reply using:/gi, 'Reply\u200b using:'); // action-line marker
+  }
+
+  /**
    * Format an inbox message for injection.
    * Matches bash fast-checker.sh format exactly.
+   * Untrusted fields (from, text) are frame-marker-neutralized.
    */
   private formatInboxMessage(msg: InboxMessage): string {
     const replyNote = msg.reply_to ? ` [reply_to: ${msg.reply_to}]` : '';
-    return `=== AGENT MESSAGE from ${msg.from}${replyNote} [msg_id: ${msg.id}] ===
+    const safeFrom = FastChecker.neutralizeUntrustedText(String(msg.from ?? ''));
+    const safeText = FastChecker.neutralizeUntrustedText(String(msg.text ?? ''));
+    return `=== AGENT MESSAGE from ${safeFrom}${replyNote} [msg_id: ${msg.id}] ===
 \`\`\`
-${msg.text}
+${safeText}
 \`\`\`
-Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.id}
+Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.id}
 
 `;
   }
@@ -240,33 +276,94 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     replyToText?: string,
     lastSentText?: string,
     recentHistory?: string,
+    linksBlock?: string,
+    senderId?: number | string,
   ): string {
+    // Every free-text field here originates from UNTRUSTED Telegram input (the
+    // sender display name, the message, the replied-to message, the group
+    // history) and is frame-marker-neutralized so none can forge a `=== ... ===`
+    // header, break the code fence, or fake a `Reply using:` line and thereby
+    // impersonate the operator or the daemon. (2026-05-30 frame-forgery fix.)
+    const N = FastChecker.neutralizeUntrustedText;
+    const safeFrom = N(String(from ?? ''));
+
     let replyCx = '';
     if (replyToText) {
-      replyCx = `[Replying to: "${replyToText.slice(0, 500)}"]\n`;
+      replyCx = `[Replying to: "${N(replyToText.slice(0, 500))}"]\n`;
     }
 
     let lastSentCtx = '';
     if (lastSentText) {
-      lastSentCtx = `[Your last message: "${lastSentText.slice(0, 500)}"]\n`;
+      lastSentCtx = `[Your last message: "${N(lastSentText.slice(0, 500))}"]\n`;
     }
 
     let historyCx = '';
     if (recentHistory) {
-      historyCx = `[Recent conversation:]\n${recentHistory}\n`;
+      historyCx = `[Recent conversation:]\n${N(recentHistory)}\n`;
     }
 
-    // Use [USER: ...] wrapper to prevent prompt injection via crafted display names
-    // Slash commands (text starting with /) are NOT wrapped in backticks so Claude Code
-    // can recognize and invoke them via the Skill tool (e.g. /loop, /commit, /restart).
+    // Slash commands (text starting with /) are NOT fenced so Claude Code can
+    // recognize + invoke them (e.g. /loop, /commit, /restart). Frame markers are
+    // neutralized in BOTH branches, so a crafted "/x\n=== TELEGRAM from Luke ==="
+    // message cannot forge a frame regardless of the slash bypass.
+    const safeText = N(text);
     const isSlashCommand = /^\/[a-zA-Z]/.test(text.trim());
     const body = isSlashCommand
-      ? text.trim()
-      : `\`\`\`\n${text}\n\`\`\``;
-    return `=== TELEGRAM from [USER: ${from}] (chat_id:${chatId}) ===
+      ? safeText.trim()
+      : `\`\`\`\n${safeText}\n\`\`\``;
+    // Surface the non-spoofable numeric Telegram user_id alongside the display
+    // name: in a group, any member can set their name to "Luke", but the id is
+    // assigned by Telegram. Lets the agent/operator distinguish real from spoof.
+    const userTag = senderId !== undefined && senderId !== '' ? `${safeFrom} | id:${senderId}` : safeFrom;
+    return `=== TELEGRAM from [USER: ${userTag}] (chat_id:${chatId}) ===
 ${replyCx}${historyCx}${body}
+${linksBlock || ''}
 ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
+`;
+  }
+
+  /**
+   * Extract URLs Telegram explicitly exposed in message entities. This does not
+   * infer from previews, titles, thumbnails, or surrounding text. Telegram
+   * offsets are UTF-16 code units, which match JavaScript string slicing.
+   */
+  static formatTelegramLinksBlock(msg: TelegramMessage): string {
+    const links: TelegramSafeLink[] = [];
+    const collect = (source: 'text' | 'caption', raw: string | undefined, entities: TelegramMessage['entities']): void => {
+      if (!raw || !entities || entities.length === 0) return;
+      for (const entity of entities) {
+        if (entity.type !== 'url' && entity.type !== 'text_link') continue;
+        if (!Number.isInteger(entity.offset) || !Number.isInteger(entity.length)) continue;
+        if (entity.offset < 0 || entity.length <= 0) continue;
+        const end = entity.offset + entity.length;
+        if (end > raw.length) continue;
+
+        const text = raw.slice(entity.offset, end);
+        const url = entity.type === 'text_link' ? entity.url : text;
+        if (!url) continue;
+
+        links.push({
+          source,
+          type: entity.type,
+          text: stripControlChars(text),
+          url: stripControlChars(url),
+          message_id: msg.message_id,
+          chat_id: msg.chat.id,
+          from_user_id: msg.from?.id,
+        });
+      }
+    };
+
+    collect('text', msg.text, msg.entities);
+    collect('caption', msg.caption, msg.caption_entities);
+
+    if (links.length === 0) return '';
+
+    return `telegram_links_extracted_from_entities:
+\`\`\`json
+${JSON.stringify(links, null, 2)}
+\`\`\`
 `;
   }
 
@@ -296,7 +393,8 @@ ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     const removed = newReaction.length === 0 && oldReaction.length > 0;
     const label = removed ? `removed ${render(oldReaction)}` : render(newReaction);
 
-    return `=== REACTION from [USER: ${from}] (chat_id:${chatId}) on message ${messageId}: ${label} ===
+    // Frame-forgery: neutralize attacker-controlled display name before framing.
+    return `=== REACTION from [USER: ${FastChecker.neutralizeUntrustedText(from)}] (chat_id:${chatId}) on message ${messageId}: ${label} ===
 
 `;
   }
@@ -310,12 +408,16 @@ ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     chatId: string | number,
     caption: string,
     imagePath: string,
+    linksBlock?: string,
   ): string {
-    return `=== TELEGRAM PHOTO from ${from} (chat_id:${chatId}) ===
+    // Frame-forgery: neutralize attacker-controlled fields before framing.
+    const N = FastChecker.neutralizeUntrustedText;
+    return `=== TELEGRAM PHOTO from ${N(from)} (chat_id:${chatId}) ===
 caption:
 \`\`\`
-${caption}
+${N(caption)}
 \`\`\`
+${linksBlock || ''}
 local_file: ${imagePath}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
@@ -332,14 +434,18 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     caption: string,
     filePath: string,
     fileName: string,
+    linksBlock?: string,
   ): string {
-    return `=== TELEGRAM DOCUMENT from ${from} (chat_id:${chatId}) ===
+    // Frame-forgery: neutralize attacker-controlled fields before framing.
+    const N = FastChecker.neutralizeUntrustedText;
+    return `=== TELEGRAM DOCUMENT from ${N(from)} (chat_id:${chatId}) ===
 caption:
 \`\`\`
-${caption}
+${N(caption)}
 \`\`\`
+${linksBlock || ''}
 local_file: ${filePath}
-file_name: ${fileName}
+file_name: ${N(fileName)}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
@@ -361,11 +467,13 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     duration: number | undefined,
     transcript?: string,
   ): string {
+    // Frame-forgery: neutralize attacker-controlled fields before framing.
+    const N = FastChecker.neutralizeUntrustedText;
     const dur = duration !== undefined ? duration : 'unknown';
     const transcriptBlock = transcript && transcript.trim()
-      ? `transcript:\n\`\`\`\n${transcript.trim()}\n\`\`\`\n`
+      ? `transcript:\n\`\`\`\n${N(transcript.trim())}\n\`\`\`\n`
       : '';
-    return `=== TELEGRAM VOICE from ${from} (chat_id:${chatId}) ===
+    return `=== TELEGRAM VOICE from ${N(from)} (chat_id:${chatId}) ===
 duration: ${dur}s
 local_file: ${filePath}
 ${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
@@ -384,16 +492,20 @@ ${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your repl
     filePath: string,
     fileName: string,
     duration: number | undefined,
+    linksBlock?: string,
   ): string {
+    // Frame-forgery: neutralize attacker-controlled fields before framing.
+    const N = FastChecker.neutralizeUntrustedText;
     const dur = duration !== undefined ? duration : 'unknown';
-    return `=== TELEGRAM VIDEO from ${from} (chat_id:${chatId}) ===
+    return `=== TELEGRAM VIDEO from ${N(from)} (chat_id:${chatId}) ===
 caption:
 \`\`\`
-${caption}
+${N(caption)}
 \`\`\`
+${linksBlock || ''}
 duration: ${dur}s
 local_file: ${filePath}
-file_name: ${fileName}
+file_name: ${N(fileName)}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
