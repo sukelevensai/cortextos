@@ -22,6 +22,23 @@ Read this file on every session start. Full reference: `.claude/skills/guardrail
 | Blocked on something | "I'll wait and see" | Create a blocker task or escalate to orchestrator immediately. Silent blockers are invisible. |
 | Work finished | "Orchestrator will notice" | Complete the task and log the event now. Unlogged completions don't exist. |
 
+### Verify-the-Chain (org-wide, 2026-05-16)
+
+| Trigger | Red Flag Thought | Required Action |
+|---------|-----------------|-----------------|
+| About to claim "fix is in source, daemon just stale" / "the patch is in" / similar two-step explanation | "I'm confident the fix exists, just unclear exactly where it lives" | Produce the 6-step chain (working tree → committed → merged → built → running → behavioral). Confidence without the chain is hallucination. Born from chase-assistant 2026-05-16 incident where "source fixed, daemon stale" was claimed with BOTH halves wrong. |
+| User or another agent says "we already fixed that" / "PR #X handles it" | "Trust it, assume it's done" | Verify with `gh pr view <N> --json state,mergedAt` AND `git merge-base --is-ancestor <commit> origin/main`. Belief ≠ system state. On 2026-05-16 PR #400 was believed shipped but was still `state: OPEN`. |
+| About to `cortextos bus update-task <T> in_progress` | "I know the prereqs are done, no need to check" | Run `cortextos bus check-deps <T>` FIRST. Refuse the transition if non-empty. Surfaces blockers pre-error. |
+| About to state ANY user attribute (timezone, location, role, working hours, preferences, family, relationships) or system attribute (file path, version, schedule) | "I'm pretty sure they're Pacific" / "the path is probably under .cortextOS" / "their role is founder" | STOP. Verify primary source FIRST in this order: (1) `$CTX_TIMEZONE`, `$CTX_*` env vars, (2) `config.json`, (3) USER.md / IDENTITY.md / GOALS.md, (4) `cortextos bus kb-query "<topic>" --org $CTX_ORG`, (5) the filesystem with `find` or `Test-Path`. **Confidence ≠ correctness**. Born from 2026-05-16 TZ miss: had `CTX_TIMEZONE=Pacific/Honolulu` directly in front of me and overrode with a prior assumption. |
+
+### Identity & Communication (org-wide)
+
+| Trigger | Red Flag Thought | Required Action |
+|---------|-----------------|-----------------|
+| About to state a @handle, chat_id, user_id, file path, URL, or any identifier in user-facing output | "I'm pretty sure it's @SomethingBot" or "the path is probably X" | STOP. Verify from primary source FIRST (API call, config file, env file, bus query). If you can't verify, say "checking..." and look it up. Never fabricate or guess an identifier. |
+| About to ask the user a question | "Let me ask about X" | Check if the answer is in: logs, source files, bus state, config, git history, another agent's state, or the knowledge base. Only ask for judgment calls, decisions, private info, or things genuinely not in the system. |
+| Finishing a task or sending a status update | "What should I do next?" or "Let me know what you'd like" | State your next action. Never end with an open ask. |
+
 For the complete red flag table (15 patterns), see `.claude/skills/guardrails-reference/SKILL.md`.
 
 ---
