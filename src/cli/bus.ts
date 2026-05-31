@@ -24,6 +24,58 @@ import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
+import { evaluateTelegramEgress } from '../bus/egress-guard.js';
+
+/**
+ * EGRESS-LOCK enforcement for outbound Telegram destinations (2026-05-30
+ * lantern-command confabulation incident). Refuses + logs a critical SECURITY
+ * event + alerts the orchestrator + exits non-zero if `chatId` is not on the
+ * agent's allow-list. Shared by every CLI path that targets a chat_id, so a
+ * confused/injected agent cannot exfiltrate to a stranger from ANY send path.
+ */
+function enforceTelegramEgress(chatId: string, env: ReturnType<typeof resolveEnv>): void {
+  const orgDir = env.frameworkRoot && env.org ? join(env.frameworkRoot, 'orgs', env.org) : undefined;
+  const egress = evaluateTelegramEgress(chatId, { agentDir: env.agentDir, orgDir });
+  if (!egress.allowed) {
+    console.error(
+      `SECURITY: refusing Telegram send — ${egress.reason}. Allowed: [${egress.allowList.join(', ')}]. ` +
+        `If this destination is legitimate, add it to TELEGRAM_OUTBOUND_ALLOWED in the agent .env.`,
+    );
+    try {
+      if (env.agentName && env.org) {
+        const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+        logEvent(
+          paths,
+          env.agentName,
+          env.org,
+          'error',
+          'egress_blocked',
+          'critical',
+          JSON.stringify({ chat_id: String(chatId), allow_list: egress.allowList }),
+        );
+        const orchestrator = process.env.CTX_ORCHESTRATOR_AGENT;
+        if (orchestrator) {
+          sendMessage(
+            paths,
+            env.agentName,
+            orchestrator,
+            'urgent',
+            `EGRESS-BLOCK: ${env.agentName} attempted a Telegram send to ${String(chatId)} which is NOT on its allow-list. Refused. If legitimate, add it to TELEGRAM_OUTBOUND_ALLOWED in that agent's .env.`,
+          );
+        }
+      }
+    } catch {
+      /* logging/alerting is best-effort; the block itself already took effect */
+    }
+    process.exit(1);
+  }
+  if (egress.unresolved) {
+    console.error(
+      `WARNING: egress allow-list could not be resolved for ${env.agentName || 'this agent'} — ` +
+        `sending WITHOUT egress enforcement. Set CHAT_ID/ALLOWED_USER in the agent .env to enable the lock.`,
+    );
+  }
+}
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
 
 /**
@@ -983,6 +1035,9 @@ busCommand
       process.exit(1);
     }
 
+    // EGRESS-LOCK: refuse sends to any chat_id not on the agent's allow-list.
+    enforceTelegramEgress(chatId, env);
+
     const api = new TelegramAPI(botToken);
     try {
       let sentMessageId = 0;
@@ -1309,6 +1364,9 @@ busCommand
       console.error('Error: BOT_TOKEN not configured. Set it in your agent .env file or as an environment variable to enable Telegram.');
       process.exit(1);
     }
+
+    // EGRESS-LOCK: editing a message targets a chat_id like a send; gate it too.
+    enforceTelegramEgress(chatId, env);
 
     const api = new TelegramAPI(botToken);
     let markup: object | undefined;
