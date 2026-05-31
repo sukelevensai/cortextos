@@ -1186,3 +1186,52 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
     })).not.toThrow();
   });
 });
+
+// GAP-0068 (identity bleed): startOrResumeThread must NEVER adopt the most-recent
+// thread for a shared cwd on persisted-resume failure. codex partitions threads by
+// cwd only (no agent-ownership), so the old findLatestThreadForCwd fallback let a
+// failed-resume agent resume a SIBLING's thread and impersonate it (2026-05-30
+// lantern CFO-identity incident). The fix: on resume-failure -> thread/start FRESH,
+// never thread/list. These are the in-session behavioral proof.
+describe('CodexAppServerPTY startOrResumeThread — GAP-0068 no sibling-adopt', () => {
+  const OWN_CWD = '/tmp/fw/orgs/acme/agents/codex-app-agent';
+
+  it('persisted-resume FAILURE → starts a FRESH thread, never lists/adopts a sibling cwd thread', async () => {
+    // Agent has its own persisted thread, but resuming it fails.
+    fsMocks.existsSync.mockImplementation((p: string) => String(p).includes('codex-app-server-thread.json'));
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({ threadId: 'own-persisted', cwd: OWN_CWD }));
+    requestMock.mockImplementation((method: string) => {
+      if (method === 'thread/resume') return Promise.reject(new Error('persisted resume failed'));
+      if (method === 'thread/list') throw new Error('GAP-0068 regression: thread/list (sibling-adopt fallback) must not be called');
+      if (method === 'thread/start') return Promise.resolve({ result: { thread: { id: 'fresh-thread' } } });
+      return Promise.resolve({ result: {} });
+    });
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+    await (pty as unknown as { startOrResumeThread: (m: string) => Promise<void> }).startOrResumeThread('continue');
+
+    const methods = requestMock.mock.calls.map((c) => c[0]);
+    expect(methods).toContain('thread/resume');           // tried its OWN persisted thread first
+    expect(methods).not.toContain('thread/list');          // never enumerated cwd siblings
+    expect(methods).toContain('thread/start');             // fell through to a fresh thread
+    expect((pty as unknown as { _threadId: string })._threadId).toBe('fresh-thread');
+  });
+
+  it('no persisted state + continue mode → starts FRESH, never lists cwd threads', async () => {
+    fsMocks.existsSync.mockReturnValue(false); // no persisted thread state
+    requestMock.mockImplementation((method: string) => {
+      if (method === 'thread/list') throw new Error('GAP-0068 regression: thread/list must not be called');
+      if (method === 'thread/start') return Promise.resolve({ result: { thread: { id: 'fresh-2' } } });
+      return Promise.resolve({ result: {} });
+    });
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+    await (pty as unknown as { startOrResumeThread: (m: string) => Promise<void> }).startOrResumeThread('continue');
+
+    const methods = requestMock.mock.calls.map((c) => c[0]);
+    expect(methods).not.toContain('thread/list');
+    expect(methods).not.toContain('thread/resume'); // nothing to resume
+    expect(methods).toContain('thread/start');
+    expect((pty as unknown as { _threadId: string })._threadId).toBe('fresh-2');
+  });
+});
