@@ -937,20 +937,28 @@ export class CodexAppServerPTY {
    *   - used_percentage = active context tokens / cap * 100  (clamped to [0, 100])
    *   - context_window_size = modelContextWindow ?? config.codex_context_cap ?? 256000
    *   - exceeds_200k_tokens = active context tokens > 200000
-   *   - current_usage.{input,output,cache_read} from total.{input,output,cachedInput}Tokens
+   *   - current_usage.{input,output,cache_read} from last.{input,output,cachedInput}Tokens
    *   - session_id = current threadId
+   *
+   * `tokenUsage.total` is cumulative for the whole app-server session. Using it
+   * for live context pressure makes every turn look worse until FastChecker
+   * forces a needless wrap. `tokenUsage.last` is the current request window,
+   * which is the value the context monitor needs.
    */
   private writeContextStatus(params: Record<string, unknown>): void {
     const tokenUsage = isRecord(params.tokenUsage) ? params.tokenUsage : null;
     if (!tokenUsage) return;
+    const last = isRecord(tokenUsage.last) ? tokenUsage.last : null;
     const total = isRecord(tokenUsage.total) ? tokenUsage.total : null;
-    if (!total) return;
-    const totalTokens = typeof total.totalTokens === 'number' ? total.totalTokens : null;
-    if (totalTokens === null) return;
+    const current = last ?? total;
+    if (!current) return;
+    const currentTotalTokens = typeof current.totalTokens === 'number' ? current.totalTokens : null;
+    if (currentTotalTokens === null) return;
+    const cumulativeTotalTokens = typeof total?.totalTokens === 'number' ? total.totalTokens : currentTotalTokens;
 
-    const inputTokens = typeof total.inputTokens === 'number' ? total.inputTokens : 0;
-    const outputTokens = typeof total.outputTokens === 'number' ? total.outputTokens : 0;
-    const cachedInputTokens = typeof total.cachedInputTokens === 'number' ? total.cachedInputTokens : 0;
+    const inputTokens = typeof current.inputTokens === 'number' ? current.inputTokens : 0;
+    const outputTokens = typeof current.outputTokens === 'number' ? current.outputTokens : 0;
+    const cachedInputTokens = typeof current.cachedInputTokens === 'number' ? current.cachedInputTokens : 0;
     const activeInputTokens = Math.max(0, inputTokens - cachedInputTokens);
     const activeContextTokens = activeInputTokens + outputTokens;
 
@@ -972,7 +980,8 @@ export class CodexAppServerPTY {
       },
       active_context_tokens: activeContextTokens,
       active_input_tokens: activeInputTokens,
-      raw_total_tokens: totalTokens,
+      raw_total_tokens: cumulativeTotalTokens,
+      raw_current_total_tokens: currentTotalTokens,
       session_id: this._threadId,
       written_at: new Date().toISOString(),
     });
