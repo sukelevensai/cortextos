@@ -707,6 +707,30 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
+    // Plan-review callbacks: plan_(allow|deny)_{hexId}. These use the same
+    // response-file mechanism as permission prompts, but a distinct prefix
+    // keeps plan approvals auditable instead of blending into generic prompts.
+    const planMatch = data.match(/^plan_(allow|deny)_([a-f0-9]+)$/);
+    if (planMatch) {
+      const [, decision, hexId] = planMatch;
+      const responseFile = join(this.paths.stateDir, `hook-response-${hexId}.json`);
+      writeFileSync(
+        responseFile,
+        JSON.stringify({ decision, response_kind: 'plan_review' }) + '\n',
+        'utf-8',
+      );
+
+      if (this.telegramApi) {
+        try { await this.telegramApi.answerCallbackQuery(callbackQueryId, 'Got it'); } catch { /* ignore */ }
+        if (chatId && messageId) {
+          const label = decision === 'allow' ? 'Plan Approved' : 'Plan Denied';
+          try { await this.telegramApi.editMessageText(chatId, messageId, label); } catch { /* ignore */ }
+        }
+      }
+      this.log(`Plan callback: ${decision} for ${hexId}`);
+      return;
+    }
+
     // Restart callbacks: restart_(allow|deny)_{hexId}
     const restartMatch = data.match(/^restart_(allow|deny)_([a-f0-9]+)$/);
     if (restartMatch) {

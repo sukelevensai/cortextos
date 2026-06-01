@@ -466,6 +466,27 @@ describe('FastChecker', () => {
       expect(api.editMessageText).toHaveBeenCalledWith(999, 42, 'Denied');
     });
 
+    it('plan_allow writes plan review response file', async () => {
+      const agent = createMockAgent();
+      const api = createMockTelegramApi();
+      const checker = new FastChecker(agent, paths, '/tmp/framework', {
+        telegramApi: api,
+        chatId: '999',
+      });
+
+      const query = createCallbackQuery('plan_allow_cafe1234');
+      await checker.handleCallback(query);
+
+      const responseFile = join(paths.stateDir, 'hook-response-cafe1234.json');
+      expect(existsSync(responseFile)).toBe(true);
+      const content = JSON.parse(readFileSync(responseFile, 'utf-8'));
+      expect(content.decision).toBe('allow');
+      expect(content.response_kind).toBe('plan_review');
+
+      expect(api.answerCallbackQuery).toHaveBeenCalledWith('cb-123', 'Got it');
+      expect(api.editMessageText).toHaveBeenCalledWith(999, 42, 'Plan Approved');
+    });
+
     it('perm_continue maps to deny decision', async () => {
       const agent = createMockAgent();
       const api = createMockTelegramApi();
