@@ -2766,7 +2766,7 @@ busCommand
     const quoteForCommand = (value: string) => `"${value.replace(/"/g, '\\"')}"`;
     const windowsCommandPath = (value: string) => value.replace(/\\/g, '/');
     const STATUS_LINE_COMMAND = isWindows
-      ? `${quoteForCommand(windowsCommandPath(process.execPath))} ${quoteForCommand(windowsCommandPath(join(frameworkRoot, 'dist', 'hooks', 'hook-context-status.js')))}`
+      ? `node ${quoteForCommand(windowsCommandPath(join(frameworkRoot, 'dist', 'hooks', 'hook-context-status.js')))}`
       : 'CORTEXTOS_ROOT="${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}"; CORTEXTOS_ROOT="$(cygpath -u "$CORTEXTOS_ROOT" 2>/dev/null || printf \'%s\' "$CORTEXTOS_ROOT")"; "$CORTEXTOS_ROOT/bin/cortextos-hook.sh" bus hook-context-status';
     const STATUS_LINE = {
       type: 'command',
