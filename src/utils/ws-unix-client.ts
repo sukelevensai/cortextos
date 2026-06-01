@@ -51,16 +51,22 @@ export class WsUnixJsonRpcClient {
   async connect(): Promise<void> {
     if (this.socket) return;
 
-    const socket = createConnection(this.socketPath);
+    const isWebSocketUrl = this.socketPath.startsWith('ws://') || this.socketPath.startsWith('wss://');
+    const url = isWebSocketUrl ? new URL(this.socketPath) : null;
+    const socket = url
+      ? createConnection({ host: url.hostname, port: Number(url.port || 80) })
+      : createConnection(this.socketPath);
     await new Promise<void>((resolve, reject) => {
       socket.once('connect', resolve);
       socket.once('error', reject);
     });
 
     const key = randomBytes(16).toString('base64');
+    const requestPath = url ? `${url.pathname || '/'}${url.search || ''}` : '/';
+    const host = url ? url.host : 'localhost';
     socket.write([
-      'GET / HTTP/1.1',
-      'Host: localhost',
+      `GET ${requestPath} HTTP/1.1`,
+      `Host: ${host}`,
       'Upgrade: websocket',
       'Connection: Upgrade',
       `Sec-WebSocket-Key: ${key}`,

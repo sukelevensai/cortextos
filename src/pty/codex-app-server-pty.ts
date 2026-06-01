@@ -1,7 +1,9 @@
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, platform } from 'os';
 import { randomBytes } from 'crypto';
+import { spawn as spawnProcess, type ChildProcessWithoutNullStreams } from 'child_process';
+import { createConnection as createNetConnection } from 'net';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
 import type { TelegramAPI } from '../telegram/api.js';
@@ -27,6 +29,41 @@ interface IPtySpawnOptions {
 }
 
 type SpawnFn = (file: string, args: string[], options: IPtySpawnOptions) => IPty;
+
+function wrapChildProcess(child: ChildProcessWithoutNullStreams): IPty {
+  return {
+    pid: child.pid ?? -1,
+    write(data: string): void {
+      child.stdin.write(data);
+    },
+    onData(callback: (data: string) => void): { dispose(): void } {
+      const handler = (chunk: Buffer) => callback(chunk.toString());
+      child.stdout.on('data', handler);
+      child.stderr.on('data', handler);
+      return {
+        dispose(): void {
+          child.stdout.off('data', handler);
+          child.stderr.off('data', handler);
+        },
+      };
+    },
+    onExit(callback: (e: { exitCode: number; signal?: number }) => void): { dispose(): void } {
+      const handler = (code: number | null, signal: NodeJS.Signals | null) => callback({
+        exitCode: code ?? 0,
+        signal: signal ? Number(signal) : undefined,
+      });
+      child.on('exit', handler);
+      return {
+        dispose(): void {
+          child.off('exit', handler);
+        },
+      };
+    },
+    kill(signal?: string): void {
+      child.kill(signal as NodeJS.Signals | undefined);
+    },
+  };
+}
 
 interface ThreadState {
   threadId: string;
@@ -408,27 +445,83 @@ export class CodexAppServerPTY {
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   }
 
+  /**
+   * Resolve the codex binary name for node-pty spawning.
+   *
+   * On Windows, node-pty/ConPTY calls CreateProcess, which does not apply
+   * PATHEXT resolution — spawning the bare, extensionless npm shim `codex`
+   * fails with "Cannot create process, error code: 2" (ENOENT) before the
+   * app-server ever boots. Probe PATH for `codex.cmd`/`codex.exe` and return
+   * whichever is present. Mirrors AgentPTY.getBinaryName() for `claude`.
+   * On non-Windows the bare `codex` name resolves natively.
+   */
+  private resolveCodexBinary(): string {
+    if (platform() !== 'win32') return 'codex';
+
+    const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+    const appBinRoot = join(localAppData, 'OpenAI', 'Codex', 'bin');
+    try {
+      if (existsSync(appBinRoot)) {
+        const versions = require('fs').readdirSync(appBinRoot).sort().reverse();
+        for (const version of versions) {
+          const exe = join(appBinRoot, version, 'codex.exe');
+          if (existsSync(exe)) return exe;
+        }
+      }
+    } catch {
+      // Fall back to PATH probing below.
+    }
+
+    const npmShim = join(homedir(), 'AppData', 'Roaming', 'npm', 'codex.cmd');
+    if (existsSync(npmShim)) return npmShim;
+
+    const pathDirs = (process.env.PATH || '').split(';').filter(Boolean);
+    for (const ext of ['.cmd', '.exe']) {
+      for (const dir of pathDirs) {
+        const candidate = join(dir, `codex${ext}`);
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+    // Neither found on PATH — fall back to the conventional Windows shim so the
+    // node-pty error surfaces a recognizable filename for debugging.
+    return 'codex.cmd';
+  }
+
   private startAppServer(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      if (!this._spawnFn) {
-        const nodePty = require('node-pty');
-        this._spawnFn = nodePty.spawn;
-      }
-
-      const spawnFn = this._spawnFn!;
-      const pty = spawnFn('codex', [
+      const args = [
         'app-server',
         '--enable', 'goals',
         '--listen', this._socketListenArg,
-      ], {
-        name: 'xterm-256color',
-        cols: 200,
-        rows: 50,
-        cwd: this._socketCwd,
-        env: this.buildEnv(),
-      });
+      ];
+
+      const pty = platform() === 'win32'
+        ? wrapChildProcess(spawnProcess(this.resolveCodexBinary(), args, {
+          cwd: this._socketCwd,
+          env: this.buildEnv(),
+          windowsHide: true,
+        }))
+        : (() => {
+          if (!this._spawnFn) {
+            const nodePty = require('node-pty');
+            this._spawnFn = nodePty.spawn;
+          }
+          return this._spawnFn!(this.resolveCodexBinary(), args, {
+            name: 'xterm-256color',
+            cols: 200,
+            rows: 50,
+            cwd: this._socketCwd,
+            env: this.buildEnv(),
+          });
+        })();
+
+      if (pty.pid === -1) {
+        reject(new Error('Failed to spawn Codex app-server'));
+        return;
+      }
 
       this._appServerPty = pty;
+
       pty.onData((data) => {
         this._outputBuffer.push(data);
         if (data.includes('Error:')) {
@@ -449,11 +542,41 @@ export class CodexAppServerPTY {
 
   private async waitForSocket(timeoutMs = 10000): Promise<void> {
     const start = Date.now();
+    if (this._socketPath.startsWith('ws://')) {
+      while (Date.now() - start < timeoutMs) {
+        if (await this.canConnectTcp(this._socketPath)) return;
+        await sleep(100);
+      }
+      throw new Error(`Timed out waiting for app-server socket: ${this._socketPath}`);
+    }
+
     while (Date.now() - start < timeoutMs) {
       if (existsSync(this._socketPath)) return;
       await sleep(100);
     }
     throw new Error(`Timed out waiting for app-server socket: ${this._socketPath}`);
+  }
+
+  private canConnectTcp(urlValue: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      try {
+        const url = new URL(urlValue);
+        const socket = createNetConnection({
+          host: url.hostname,
+          port: Number(url.port),
+        });
+        const done = (ok: boolean) => {
+          socket.removeAllListeners();
+          socket.destroy();
+          resolve(ok);
+        };
+        socket.once('connect', () => done(true));
+        socket.once('error', () => done(false));
+        socket.setTimeout(500, () => done(false));
+      } catch {
+        resolve(false);
+      }
+    });
   }
 
   private async connectRpc(): Promise<void> {
@@ -857,6 +980,24 @@ export class CodexAppServerPTY {
   }
 
   private resolveSocketPath(): { path: string; listenArg: string; cwd: string } {
+    if (platform() === 'win32') {
+      const port = 49152 + randomBytes(2).readUInt16BE(0) % 12000;
+      const url = `ws://127.0.0.1:${port}`;
+      const pointer: SocketPointer = {
+        socketPath: url,
+        fallback: true,
+        reason: 'windows codex app-server uses localhost websocket transport',
+        updatedAt: new Date().toISOString(),
+      };
+      try {
+        ensureDir(this._stateDir);
+        writeFileSync(this._socketPointerPath, `${JSON.stringify(pointer, null, 2)}\n`, 'utf-8');
+      } catch {
+        // Non-fatal; spawn will still use the websocket URL.
+      }
+      return { path: url, listenArg: url, cwd: this._stateDir };
+    }
+
     const defaultPath = join(this._stateDir, SOCKET_BASENAME);
     if (Buffer.byteLength(defaultPath) < SOCKET_PATH_WARN_BYTES) {
       return { path: defaultPath, listenArg: `unix://./${SOCKET_BASENAME}`, cwd: this._stateDir };
