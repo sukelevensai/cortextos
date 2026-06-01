@@ -298,11 +298,19 @@ export function checkGoalStaleness(
         continue;
       }
 
-      // Find "## Updated" section and get the next line
+      // Find "## Updated" section and get the next line, or accept the
+      // older one-line "Updated: <date>" format used by early agents.
       const lines = content.split('\n');
       let updatedLine: string | null = null;
       for (let i = 0; i < lines.length; i++) {
-        if (lines[i].trim().startsWith('## Updated')) {
+        const line = lines[i].trim();
+        const inlineUpdated = line.match(/^Updated:\s*(.+)$/i);
+        if (inlineUpdated?.[1]) {
+          updatedLine = inlineUpdated[1].trim();
+          break;
+        }
+
+        if (line.startsWith('## Updated')) {
           // Get next non-empty line
           for (let j = i + 1; j < lines.length; j++) {
             const trimmed = lines[j].trim();
