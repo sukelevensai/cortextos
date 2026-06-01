@@ -55,6 +55,14 @@ AGENTS.md
 dashboard/screenshots/
 dashboard/test-*.py
 
+# Local Windows recovery artifacts from daemon/session repair drills.
+reports/
+scripts/cutover-restart.ps1
+scripts/daemon-svc-launch.cmd
+scripts/dashboard-svc-launch.cmd
+scripts/repair-session0-daemon-admin.ps1
+scripts/repair-session0-task-principal-admin.ps1
+
 # Public community agent templates may intentionally include their own docs,
 # AGENTS.md, memory skill, and scaffold files.
 !community/agents/research-agent/
