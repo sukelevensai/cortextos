@@ -2762,9 +2762,10 @@ busCommand
       'ToolSearch', 'CronCreate', 'CronList', 'CronDelete',
       'Skill', 'Agent',
     ];
+    const STATUS_LINE_COMMAND = 'CORTEXTOS_ROOT="${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}"; CORTEXTOS_ROOT="$(cygpath -u "$CORTEXTOS_ROOT" 2>/dev/null || printf \'%s\' "$CORTEXTOS_ROOT")"; "$CORTEXTOS_ROOT/bin/cortextos-hook.sh" bus hook-context-status';
     const STATUS_LINE = {
       type: 'command',
-      command: 'cortextos bus hook-context-status',
+      command: STATUS_LINE_COMMAND,
       refreshInterval: 5,
       timeout: 2,
     };
@@ -2785,7 +2786,7 @@ busCommand
         if (!fsExists(settingsPath)) continue;
 
         let settings: any;
-        try { settings = JSON.parse(fsRead(settingsPath, 'utf-8')); }
+        try { settings = JSON.parse(fsRead(settingsPath, 'utf-8').replace(/^\uFEFF/, '')); }
         catch { console.warn(`  SKIP ${agent}: could not parse settings.json`); skipped++; continue; }
 
         const changes: string[] = [];

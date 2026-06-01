@@ -60,6 +60,7 @@ export class FastChecker {
   // Context monitor state
   private ctxConfigMtime: number = 0;
   private ctxWarningFiredAt: number = 0;    // dedup: 15min cooldown between warnings
+  private ctxStrongWarningFiredAt: number = 0; // dedup: 15min cooldown between strong warnings
   private ctxHandoffFiredAt: number = 0;    // fires once per session (0 = not yet)
   private ctxHandoffDeadlineAt: number = 0; // timestamp after which force-restart fires
   private ctxLastSessionId: string | null = null; // detects new session → clears stale deadline
@@ -120,9 +121,19 @@ export class FastChecker {
     const agentName = this.agent.name;
     this.heartbeatTimer = setInterval(() => {
       const ts = new Date().toISOString();
-      execFile('cortextos', ['bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`], (err) => {
-        if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
-      });
+      const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || process.cwd();
+      const cliPath = join(frameworkRoot, 'dist', 'cli.js');
+      if (existsSync(cliPath)) {
+        execFile(
+          process.execPath,
+          [cliPath, 'bus', 'update-heartbeat', `[watchdog] ${agentName} alive - idle session ${ts}`],
+          (err) => {
+            if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
+          },
+        );
+        return;
+      }
+      this.log(`Heartbeat watchdog error: missing Cortex CLI at ${cliPath}`);
     }, HEARTBEAT_INTERVAL_MS);
 
     while (this.running) {
@@ -986,7 +997,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
    * Re-reads from disk only when the file has changed so dashboard updates take effect
    * within one poll cycle without a daemon restart.
    */
-  private getCtxThresholds(): { warn: number; handoff: number } {
+  private getCtxThresholds(): { warn: number; strong: number; handoff: number } {
     try {
       const configPath = join(this.agent.getAgentDir(), 'config.json');
       const mtime = statSync(configPath).mtimeMs;
@@ -994,6 +1005,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
         const config = this.agent.getConfig();
         config.ctx_warning_threshold = cfg.ctx_warning_threshold;
+        config.ctx_strong_warning_threshold = cfg.ctx_strong_warning_threshold;
         config.ctx_handoff_threshold = cfg.ctx_handoff_threshold;
         this.ctxConfigMtime = mtime;
       }
@@ -1001,6 +1013,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     const config = this.agent.getConfig();
     return {
       warn: config.ctx_warning_threshold ?? 70,
+      strong: config.ctx_strong_warning_threshold ?? 75,
       handoff: config.ctx_handoff_threshold ?? 80,
     };
   }
@@ -1048,6 +1061,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
           this.ctxHandoffFiredAt = 0;
           this.ctxHandoffDeadlineAt = 0;
           this.ctxWarningFiredAt = 0;
+          this.ctxStrongWarningFiredAt = 0;
           this.log(`New session detected (${incomingSessionId.slice(0, 8)}…) — per-session ctx state reset`);
         }
         this.ctxLastSessionId = incomingSessionId;
@@ -1062,7 +1076,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
-    const { warn, handoff } = this.getCtxThresholds();
+    const { warn, strong, handoff } = this.getCtxThresholds();
 
     // No threshold configured — observe-only mode (log but don't act)
     if (this.agent.getConfig().ctx_handoff_threshold === undefined) return;
@@ -1078,13 +1092,22 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
-    // Tier 1: warning — PTY injection only, no Telegram ping (context management is internal)
+    // Tier 1: warning. The agent must surface this to the active chat and steer
+    // toward a human-approved wrap instead of silently starting fresh work.
     if (effectivePct >= warn && now - this.ctxWarningFiredAt > 15 * 60_000) {
       this.ctxWarningFiredAt = now;
       const pctRound = Math.round(effectivePct);
-      const statusSuffix = effectivePct >= handoff ? 'Handoff in progress.' : `Handoff triggers at ${handoff}%.`;
-      this.agent.injectMessage(`[CONTEXT] Window at ${pctRound}%. ${statusSuffix}`);
+      const statusSuffix = effectivePct >= strong ? `Strong warning triggers at ${strong}%; handoff triggers at ${handoff}%.` : `Strong warning triggers at ${strong}%.`;
+      this.agent.injectMessage(`[CONTEXT] Window at ${pctRound}%. Context is getting high, but do not panic-wrap early. Tell the active chat to finish the current thread soon, avoid starting large new work, then wrap when the thread reaches a natural stopping point. End the wrap by telling the user the next message should be: git pull. ${statusSuffix}`);
       this.log(`Context warning fired at ${pctRound}%`);
+    }
+
+    // Tier 1b: stronger warning. No new tasks; prepare handoff.
+    if (effectivePct >= strong && now - this.ctxStrongWarningFiredAt > 15 * 60_000) {
+      this.ctxStrongWarningFiredAt = now;
+      const pctRound = Math.round(effectivePct);
+      this.agent.injectMessage(`[CONTEXT STRONG WARNING] Window at ${pctRound}%. Do not start new work. Surface this to the active chat, finish only the current thread, checkpoint important repo/Obsidian state, and prepare to wrap. Handoff triggers at ${handoff}%. Next message after wrap should be: git pull.`);
+      this.log(`Context strong warning fired at ${pctRound}%`);
     }
 
     // Tier 2: handoff (fires once per session lifecycle)
@@ -1158,6 +1181,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     this.ctxHandoffFiredAt = 0;
     this.ctxHandoffDeadlineAt = 0;
     this.ctxWarningFiredAt = 0;
+    this.ctxStrongWarningFiredAt = 0;
 
     // Write .force-fresh + .restart-planned (hardRestart from src/bus/system.ts)
     hardRestart(this.paths, this.agent.name, `CONTEXT-FORCE-RESTART: ${reason}`);

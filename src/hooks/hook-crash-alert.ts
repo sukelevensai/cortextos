@@ -120,21 +120,17 @@ export function notifyAgents(opts: {
   // very crashes this hook exists to surface. Invoke via process.execPath +
   // dist/cli.js path (same pattern as fast-checker.ts heartbeat watchdog).
   const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT;
-  const cliPath = frameworkRoot ? join(frameworkRoot, 'dist', 'cli.js') : null;
+  const cliCandidates = [
+    frameworkRoot ? join(frameworkRoot, 'dist', 'cli.js') : null,
+    join(process.cwd(), 'dist', 'cli.js'),
+  ].filter(Boolean) as string[];
+  const cliPath = cliCandidates.find(path => existsSync(path));
   for (const target of opts.recipients) {
     try {
       if (cliPath) {
         execFile(
           process.execPath,
           [cliPath, 'bus', 'send-message', target, 'high', body],
-          { timeout: 10_000 },
-          () => { /* fire-and-forget */ },
-        );
-      } else {
-        // Fallback: CTX_FRAMEWORK_ROOT unset (rare — test env). Try PATH lookup.
-        execFile(
-          'cortextos',
-          ['bus', 'send-message', target, 'high', body],
           { timeout: 10_000 },
           () => { /* fire-and-forget */ },
         );
@@ -448,6 +444,7 @@ async function main(): Promise<void> {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(8000),
         body: JSON.stringify({ chat_id: chatId, text: message }),
       });
       if (!res.ok) {

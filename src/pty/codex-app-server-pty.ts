@@ -598,7 +598,12 @@ export class CodexAppServerPTY {
   }
 
   private async startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> {
-    const persisted = this.readThreadState();
+    if (mode === 'fresh') {
+      this.clearThreadState();
+      this.resetContextStatus();
+    }
+
+    const persisted = mode === 'continue' ? this.readThreadState() : null;
     if (persisted) {
       try {
         const resumed = await this.request<ThreadResponse>('thread/resume', {
@@ -617,18 +622,17 @@ export class CodexAppServerPTY {
     }
 
     // GAP-0068 (identity-bleed fix): on persisted-resume failure (or no persisted
-    // state) we deliberately do NOT fall back to the most-recent thread for this
-    // cwd. codex partitions threads by cwd ONLY (no agent-ownership field), so in a
+    // state) we deliberately do not fall back to the most-recent thread for this
+    // cwd. codex partitions threads by cwd only (no agent-ownership field), so in a
     // shared working_directory that fallback would adopt whichever SIBLING agent was
     // most-recently active — the agent would resume a sibling's conversation and
     // believe it IS the sibling (the 2026-05-30 lantern CFO-identity incident: a
     // failed-resume jay-sidekick adopted the CFO thread and announced "Lantern CFO
     // is back online"). The agent's OWN continuity comes from the per-agent
-    // persisted-thread path above; when that is unavailable we start a FRESH thread
+    // persisted-thread path above; when that is unavailable we start a fresh thread
     // (safe — the agent reloads from its durable memory) rather than risk
-    // cross-identity adoption. `mode` is intentionally not branched on here: the
-    // start-fresh fallthrough is correct for both modes (#437 keeps the per-agent
-    // persisted-resume in both modes; that path is agent-owned and unaffected).
+    // cross-identity adoption. Continue mode uses the per-agent persisted path;
+    // fresh mode ignores it so context handoffs can escape exhausted sessions.
     const started = await this.request<ThreadResponse>('thread/start', {
       cwd: this._cwd,
       ...THREAD_PERMISSION_OVERRIDES,
@@ -638,6 +642,7 @@ export class CodexAppServerPTY {
       persistExtendedHistory: true,
     });
     this.setThreadId(started.result!.thread.id);
+    this.resetContextStatus();
   }
 
   private queueTurn(input: unknown[]): void {
@@ -883,15 +888,49 @@ export class CodexAppServerPTY {
     writeFileSync(this._threadStatePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
   }
 
+  private clearThreadState(): void {
+    if (!existsSync(this._threadStatePath)) return;
+    try {
+      unlinkSync(this._threadStatePath);
+    } catch {
+      // Non-fatal: thread/start below still creates a fresh app-server thread.
+    }
+  }
+
+  private resetContextStatus(): void {
+    const payload = JSON.stringify({
+      used_percentage: 0,
+      context_window_size: this._config.codex_context_cap ?? 256000,
+      exceeds_200k_tokens: false,
+      current_usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      active_context_tokens: 0,
+      active_input_tokens: 0,
+      raw_total_tokens: 0,
+      session_id: this._threadId,
+      written_at: new Date().toISOString(),
+    });
+
+    try {
+      atomicWriteSync(join(this._stateDir, 'context_status.json'), payload);
+    } catch {
+      // Non-fatal: FastChecker will skip stale/missing files gracefully.
+    }
+  }
+
   /**
    * Translate a `thread/tokenUsage/updated` notification from codex-app-server
    * into the context_status.json shape consumed by the FastChecker context
    * monitor. Writes atomically; failures are non-fatal (observability only).
    *
    * Mapping (per codex schema ThreadTokenUsageUpdatedNotification):
-   *   - used_percentage = total.totalTokens / cap * 100  (clamped to [0, 100])
+   *   - used_percentage = active context tokens / cap * 100  (clamped to [0, 100])
    *   - context_window_size = modelContextWindow ?? config.codex_context_cap ?? 256000
-   *   - exceeds_200k_tokens = total.totalTokens > 200000
+   *   - exceeds_200k_tokens = active context tokens > 200000
    *   - current_usage.{input,output,cache_read} from total.{input,output,cachedInput}Tokens
    *   - session_id = current threadId
    */
@@ -903,26 +942,31 @@ export class CodexAppServerPTY {
     const totalTokens = typeof total.totalTokens === 'number' ? total.totalTokens : null;
     if (totalTokens === null) return;
 
+    const inputTokens = typeof total.inputTokens === 'number' ? total.inputTokens : 0;
+    const outputTokens = typeof total.outputTokens === 'number' ? total.outputTokens : 0;
+    const cachedInputTokens = typeof total.cachedInputTokens === 'number' ? total.cachedInputTokens : 0;
+    const activeInputTokens = Math.max(0, inputTokens - cachedInputTokens);
+    const activeContextTokens = activeInputTokens + outputTokens;
+
     const modelContextWindow = typeof tokenUsage.modelContextWindow === 'number'
       ? tokenUsage.modelContextWindow
       : null;
     const cap = modelContextWindow ?? this._config.codex_context_cap ?? 256000;
-    const usedPct = cap > 0 ? Math.min(100, (totalTokens / cap) * 100) : null;
-
-    const inputTokens = typeof total.inputTokens === 'number' ? total.inputTokens : 0;
-    const outputTokens = typeof total.outputTokens === 'number' ? total.outputTokens : 0;
-    const cachedInputTokens = typeof total.cachedInputTokens === 'number' ? total.cachedInputTokens : 0;
+    const usedPct = cap > 0 ? Math.min(100, (activeContextTokens / cap) * 100) : null;
 
     const payload = JSON.stringify({
       used_percentage: usedPct,
       context_window_size: cap,
-      exceeds_200k_tokens: totalTokens > 200000,
+      exceeds_200k_tokens: activeContextTokens > 200000,
       current_usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         cache_read_input_tokens: cachedInputTokens,
         cache_creation_input_tokens: 0,
       },
+      active_context_tokens: activeContextTokens,
+      active_input_tokens: activeInputTokens,
+      raw_total_tokens: totalTokens,
       session_id: this._threadId,
       written_at: new Date().toISOString(),
     });

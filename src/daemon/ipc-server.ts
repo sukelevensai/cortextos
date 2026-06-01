@@ -522,7 +522,10 @@ export class IPCServer {
           // Race: process was killed after unlink but before bind completed.
           // Clean up the re-created socket and retry once.
           try { unlinkSync(this.socketPath); } catch { /* ignore */ }
-          this.server!.listen(this.socketPath, () => {
+          const listenOptions = process.platform === 'win32'
+            ? { path: this.socketPath, readableAll: true, writableAll: true }
+            : this.socketPath;
+          this.server!.listen(listenOptions as any, () => {
             console.log(`[ipc] Listening on ${this.socketPath} (recovered from stale socket)`);
             resolve();
           });
@@ -531,7 +534,10 @@ export class IPCServer {
         }
       });
 
-      this.server.listen(this.socketPath, () => {
+      const listenOptions = process.platform === 'win32'
+        ? { path: this.socketPath, readableAll: true, writableAll: true }
+        : this.socketPath;
+      this.server.listen(listenOptions as any, () => {
         if (process.platform !== 'win32') {
           try {
             chmodSync(this.socketPath, 0o600);

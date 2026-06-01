@@ -9,14 +9,41 @@ import { homedir } from 'os';
 import * as crypto from 'crypto';
 
 /**
- * Read all data from stdin as a string.
+ * Read data from stdin as a string, but fail open if the hook runner keeps
+ * stdin alive. Hook callers must never be able to strand shell workers.
  */
-export function readStdin(): Promise<string> {
+export function readStdin(timeoutMs = 5000): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer<ArrayBufferLike>[] = [];
-    process.stdin.on('data', (chunk: Buffer<ArrayBufferLike>) => chunks.push(chunk));
-    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-    process.stdin.on('error', reject);
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      process.stdin.off('data', onData);
+      process.stdin.off('end', onEnd);
+      process.stdin.off('error', onError);
+    };
+    const finish = (value: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk: Buffer<ArrayBufferLike>) => chunks.push(chunk);
+    const onEnd = () => finish(Buffer.concat(chunks).toString('utf-8'));
+    const onError = (error: Error) => fail(error);
+
+    process.stdin.on('data', onData);
+    process.stdin.on('end', onEnd);
+    process.stdin.on('error', onError);
+    timer = setTimeout(() => finish(Buffer.concat(chunks).toString('utf-8')), timeoutMs);
   });
 }
 

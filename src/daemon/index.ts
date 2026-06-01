@@ -230,6 +230,12 @@ function handleFatal(
   doExit: boolean,
 ): void {
   const errStr = err instanceof Error ? (err.stack || err.message) : String(err);
+
+  if (process.platform === 'win32' && errStr.includes('AttachConsole failed')) {
+    console.error(`[daemon] BENIGN recovered ${tag}: node-pty AttachConsole cleanup race`);
+    console.error(errStr);
+    return;
+  }
   console.error(`[daemon] FATAL ${tag} — exiting for PM2 respawn`);
   console.error(errStr);
 

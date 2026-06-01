@@ -178,6 +178,8 @@ export interface AgentConfig {
   ecosystem?: EcosystemConfig;
   /** Context window % at which to warn agent + user. Default: 70. Absent = observe-only. */
   ctx_warning_threshold?: number;
+  /** Context window % at which to issue a stronger no-new-work warning. Default: 75. */
+  ctx_strong_warning_threshold?: number;
   /** Context window % at which to inject handoff prompt and hard-restart. Default: 80. */
   ctx_handoff_threshold?: number;
   /**

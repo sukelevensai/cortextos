@@ -232,6 +232,10 @@ export class AgentManager {
     const inRegistry = this.agents.has(name);
     if (op === 'start') {
       if (inRegistry) {
+        const status = this.agents.get(name)?.process.getStatus().status;
+        if (status === 'crashed' || status === 'halted') {
+          return { ok: true };
+        }
         return { ok: false, code: 'DEDUPED', message: `start request for "${name}" deduped — agent already in registry (in-flight start or already running)` };
       }
       return { ok: true };
@@ -245,6 +249,12 @@ export class AgentManager {
 
   async startAgent(name: string, agentDir: string, config?: AgentConfig, org?: string): Promise<void> {
     if (this.agents.has(name)) {
+      const status = this.agents.get(name)?.process.getStatus().status;
+      if (status === 'crashed' || status === 'halted') {
+        console.log(`[agent-manager] ${name} is ${status} but still in registry. Treating start as recovery restart.`);
+        await this.restartAgent(name);
+        return;
+      }
       // BUG-031: this branch was the workaround for the BUG-011 PTY race
       // (restart-all could send stop+start simultaneously, and the new
       // start would arrive while the old stop's PTY exit was still in
@@ -1250,6 +1260,7 @@ export class AgentManager {
       return {};
     }
     try {
+      raw = raw.replace(/^\uFEFF/, '');
       return JSON.parse(raw);
     } catch (err) {
       const msg = (err as SyntaxError).message;
