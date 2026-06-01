@@ -326,8 +326,10 @@ export function checkGoalStaleness(
         continue;
       }
 
-      // Parse ISO 8601 timestamp
-      const parsedDate = new Date(updatedLine);
+      // Parse ISO 8601 timestamp. GOALS.md may append attribution, for example
+      // "2026-05-30T15:44:44Z (by smith)".
+      const timestampMatch = updatedLine.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z/);
+      const parsedDate = new Date(timestampMatch?.[0] ?? updatedLine);
       if (isNaN(parsedDate.getTime())) {
         agents.push({
           agent: agentName,

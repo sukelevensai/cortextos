@@ -2762,12 +2762,17 @@ busCommand
       'ToolSearch', 'CronCreate', 'CronList', 'CronDelete',
       'Skill', 'Agent',
     ];
-    const STATUS_LINE_COMMAND = 'CORTEXTOS_ROOT="${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}"; CORTEXTOS_ROOT="$(cygpath -u "$CORTEXTOS_ROOT" 2>/dev/null || printf \'%s\' "$CORTEXTOS_ROOT")"; "$CORTEXTOS_ROOT/bin/cortextos-hook.sh" bus hook-context-status';
+    const isWindows = process.platform === 'win32';
+    const quoteForCommand = (value: string) => `"${value.replace(/"/g, '\\"')}"`;
+    const windowsCommandPath = (value: string) => value.replace(/\\/g, '/');
+    const STATUS_LINE_COMMAND = isWindows
+      ? `${quoteForCommand(windowsCommandPath(process.execPath))} ${quoteForCommand(windowsCommandPath(join(frameworkRoot, 'dist', 'hooks', 'hook-context-status.js')))}`
+      : 'CORTEXTOS_ROOT="${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}"; CORTEXTOS_ROOT="$(cygpath -u "$CORTEXTOS_ROOT" 2>/dev/null || printf \'%s\' "$CORTEXTOS_ROOT")"; "$CORTEXTOS_ROOT/bin/cortextos-hook.sh" bus hook-context-status';
     const STATUS_LINE = {
       type: 'command',
       command: STATUS_LINE_COMMAND,
-      refreshInterval: 5,
-      timeout: 2,
+      refreshInterval: isWindows ? 60 : 5,
+      timeout: isWindows ? 30 : 2,
     };
 
     if (!fsExists(orgsDir)) {
@@ -2798,6 +2803,9 @@ busCommand
 
         // Check statusLine
         if (!settings.statusLine) changes.push('statusLine: add hook-context-status');
+        else if (settings.statusLine.command !== STATUS_LINE.command) changes.push('statusLine: update hook-context-status command');
+        else if (settings.statusLine.refreshInterval !== STATUS_LINE.refreshInterval) changes.push('statusLine: update refreshInterval');
+        else if (settings.statusLine.timeout !== STATUS_LINE.timeout) changes.push('statusLine: update timeout');
 
         if (changes.length === 0) {
           console.log(`  OK   ${agent}: already up to date`);
