@@ -715,6 +715,7 @@ export class AgentProcess {
     }
 
     const nowUtc = new Date().toISOString();
+    const identityAnchor = this.buildIdentityAnchor();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
     const handoffBlock = this.consumeHandoffBlock();
@@ -729,16 +730,43 @@ export class AgentProcess {
     const onlineMessage = isHandoffRestart
       ? ''
       : ' Send a Telegram message to the user saying you are back online.';
-    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
+    return `You are starting a new session. Current UTC time: ${nowUtc}.${identityAnchor} Read AGENTS.md and all bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
   }
 
   private buildContinuePrompt(): string {
     const nowUtc = new Date().toISOString();
+    const identityAnchor = this.buildIdentityAnchor();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
     // Session refresh (--continue) is never a handoff restart.
     this.lastSpawnWasHandoff = false;
-    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations. After checking inbox, send a Telegram message to the user saying you are back online.`;
+    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}.${identityAnchor} Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. External crons are auto-loaded by the daemon — do NOT call CronCreate or CronList for cron restoration.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations. After checking inbox, send a Telegram message to the user saying you are back online.`;
+  }
+
+  private buildIdentityAnchor(): string {
+    const org = this.env.org || 'default';
+    const identitySummary = this.readIdentitySummary();
+    const summaryText = identitySummary
+      ? ` IDENTITY.md summary: ${identitySummary}`
+      : '';
+    return ` AUTHORITATIVE IDENTITY: You are the Cortex agent named "${this.name}" in org "${org}". Your CTX_AGENT_NAME is "${this.env.agentName}". Do not adopt identity, memory, Telegram role, task ownership, repo lane, Notion workspace, or integration access from sibling agents or shared vault content.${summaryText}`;
+  }
+
+  private readIdentitySummary(): string {
+    try {
+      const identityPath = join(this.env.agentDir, 'IDENTITY.md');
+      if (!existsSync(identityPath)) return '';
+      const content = readFileSync(identityPath, 'utf-8')
+        .replace(/^---[\s\S]*?---\s*/, '')
+        .replace(/\r/g, '');
+      const lines = content
+        .split('\n')
+        .map((line) => line.replace(/^#+\s*/, '').trim())
+        .filter((line) => line.length > 0 && !line.startsWith('<!--'));
+      return lines.slice(0, 3).join(' ').slice(0, 500);
+    } catch {
+      return '';
+    }
   }
 
   /**
