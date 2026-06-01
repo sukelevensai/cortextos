@@ -1,0 +1,68 @@
+name: Block restricted source markers
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+      - "fix/**"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository text
+        shell: python
+        run: |
+          import base64
+          import pathlib
+          import subprocess
+          import sys
+
+          encoded_terms = [
+              "YWxpZ25hYmxl",
+              "YWxpZ25hYmxlX3JlcG9ydGluZw==",
+              "c3BvbnNvcnNoaXBfYWJhbmRvbg==",
+              "c3BvbnNvcnNoaXBfcHVyY2hhc2Vk",
+              "c3BvbnNvcnNoaXBfcHVyY2hhc2U=",
+              "cmVwb3J0aW5nX3Yy",
+              "c2ZfaXNfbXFs",
+              "c2ZfaXNfcHFs",
+              "c2ZfaGFzX2FjdGl2ZV9tZW1iZXJzaGlw",
+              "c2ZfbGlmZXRpbWVfbWVtYmVyc2hpcF9yZXZlbnVl",
+              "c2ZfZW1haWxfY2xpY2tz",
+              "c2ZfcmVjZW50X3Vuc3Vi",
+              "c2ZfZXZlcl9zcGFtX3JlcG9ydGVk",
+          ]
+          terms = [base64.b64decode(term).decode("utf-8").lower() for term in encoded_terms]
+          skip_files = {"package-lock.json", "pnpm-lock.yaml"}
+          hits = []
+
+          raw_files = subprocess.check_output(["git", "ls-files", "-z"])
+          for raw_path in raw_files.split(b"\0"):
+              if not raw_path:
+                  continue
+              path = pathlib.Path(raw_path.decode("utf-8", errors="ignore"))
+              if path.name in skip_files or not path.is_file():
+                  continue
+              try:
+                  text = path.read_text(encoding="utf-8", errors="ignore").lower()
+              except OSError:
+                  continue
+              for term in terms:
+                  if term in text:
+                      hits.append(str(path))
+                      break
+
+          if hits:
+              for path in hits:
+                  print(path)
+              print("::error::Restricted source marker found in public repository content.")
+              sys.exit(1)
+
+          print("No restricted source markers found.")
