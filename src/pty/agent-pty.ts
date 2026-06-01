@@ -348,6 +348,15 @@ export class AgentPTY {
       delete env['Path'];
     }
 
+    const frameworkBin = join(this.env.frameworkRoot, 'bin');
+    if (existsSync(frameworkBin)) {
+      const entries = (env['PATH'] || '').split(';').filter(Boolean);
+      const hasFrameworkBin = entries.some((entry) => entry.toLowerCase() === frameworkBin.toLowerCase());
+      if (!hasFrameworkBin) {
+        env['PATH'] = [frameworkBin, ...entries].join(';');
+      }
+    }
+
     env['CLAUDE_CODE_USE_POWERSHELL_TOOL'] = '1';
     env['CLAUDE_CODE_SHELL'] = 'powershell.exe';
     env['CLAUDE_BASH_NO_LOGIN'] = 'true';

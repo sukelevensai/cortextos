@@ -1104,9 +1104,26 @@ export class CodexAppServerPTY {
   private buildEnv(): Record<string, string> {
     const env: Record<string, string> = {};
 
-    const keepVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL', 'TMPDIR'];
+    const keepVars = [
+      'PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL',
+      'TMPDIR', 'TEMP', 'TMP', 'NODE_PATH', 'COMSPEC', 'USERPROFILE',
+      'SystemDrive', 'SystemRoot', 'windir', 'APPDATA', 'LOCALAPPDATA',
+      'ProgramData', 'ALLUSERSPROFILE', 'ProgramFiles', 'ProgramFiles(x86)',
+      'ProgramW6432', 'HOMEDRIVE', 'HOMEPATH', 'PUBLIC', 'PATHEXT',
+    ];
     for (const key of keepVars) {
       if (process.env[key]) env[key] = process.env[key]!;
+    }
+
+    if (platform() === 'win32') {
+      const frameworkBin = join(this._env.frameworkRoot, 'bin');
+      if (existsSync(frameworkBin)) {
+        const entries = (env['PATH'] || '').split(';').filter(Boolean);
+        const hasFrameworkBin = entries.some((entry) => entry.toLowerCase() === frameworkBin.toLowerCase());
+        if (!hasFrameworkBin) {
+          env['PATH'] = [frameworkBin, ...entries].join(';');
+        }
+      }
     }
 
     env['CTX_INSTANCE_ID'] = this._env.instanceId;
