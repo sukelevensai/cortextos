@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { platform } from 'os';
 
 const fsMocks = {
   existsSync: vi.fn().mockReturnValue(false),
@@ -76,6 +77,9 @@ const mockEnv = {
   projectRoot: '/tmp/fw',
 };
 
+const isWindows = platform() === 'win32';
+const normalizePath = (path: unknown) => String(path).replace(/\\/g, '/');
+
 beforeEach(() => {
   fsMocks.existsSync.mockReset().mockReturnValue(false);
   fsMocks.readFileSync.mockReset();
@@ -94,6 +98,17 @@ beforeEach(() => {
 describe('CodexAppServerPTY socket path policy', () => {
   it('uses codex.sock in the agent state dir by default', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
+    if (isWindows) {
+      expect((pty as unknown as { _socketPath: string })._socketPath).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+      expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+      expect(normalizePath((pty as unknown as { _socketCwd: string })._socketCwd)).toBe('/tmp/ctx/state/codex-app-agent');
+      expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('codex-app-server-socket.json'),
+        expect.stringContaining('windows codex app-server uses localhost websocket transport'),
+        'utf-8',
+      );
+      return;
+    }
     expect((pty as unknown as { _socketPath: string })._socketPath).toBe('/tmp/ctx/state/codex-app-agent/codex.sock');
     expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toBe('unix://./codex.sock');
   });
@@ -105,6 +120,16 @@ describe('CodexAppServerPTY socket path policy', () => {
     };
     const pty = new CodexAppServerPTY(longEnv, {});
     const socketPath = (pty as unknown as { _socketPath: string })._socketPath;
+    if (isWindows) {
+      expect(socketPath).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+      expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+      expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('codex-app-server-socket.json'),
+        expect.stringContaining('windows codex app-server uses localhost websocket transport'),
+        'utf-8',
+      );
+      return;
+    }
     expect(socketPath).toMatch(/\/cas-[a-f0-9]{8}\.sock$/);
     expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^unix:\/\/\.\/cas-[a-f0-9]{8}\.sock$/);
     expect((pty as unknown as { _socketCwd: string })._socketCwd).toBe('/tmp');
@@ -806,6 +831,10 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       expect.stringContaining('"threadId": "fresh-thread"'),
       'utf-8',
     );
+    const threadWrite = fsMocks.writeFileSync.mock.calls.find((call) => String(call[0]).includes('codex-app-server-thread.json'));
+    expect(threadWrite?.[1]).toContain('"agentName": "codex-app-agent"');
+    expect(threadWrite?.[1]).toContain('"org": "acme"');
+    expect(threadWrite?.[1]).toContain('"stateSchemaVersion": 2');
   });
 
   it('resumes the persisted thread in continue mode', async () => {
@@ -813,6 +842,9 @@ describe('CodexAppServerPTY thread lifecycle', () => {
     fsMocks.readFileSync.mockReturnValue(JSON.stringify({
       threadId: 'persisted-thread',
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      agentName: 'codex-app-agent',
+      org: 'acme',
+      stateSchemaVersion: 2,
       updatedAt: '2026-05-07T00:00:00Z',
     }));
     requestMock.mockResolvedValue({ result: { thread: { id: 'persisted-thread' } } });
@@ -832,21 +864,21 @@ describe('CodexAppServerPTY thread lifecycle', () => {
     });
   });
 
-  it('resumes the persisted thread in fresh mode when state exists', async () => {
+  it('stamps legacy persisted thread state with this agent after resume', async () => {
     fsMocks.existsSync.mockReturnValue(true);
     fsMocks.readFileSync.mockReturnValue(JSON.stringify({
-      threadId: 'persisted-fresh-thread',
+      threadId: 'legacy-thread',
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       updatedAt: '2026-05-07T00:00:00Z',
     }));
-    requestMock.mockResolvedValue({ result: { thread: { id: 'persisted-fresh-thread' } } });
+    requestMock.mockResolvedValue({ result: { thread: { id: 'legacy-thread' } } });
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
 
-    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('fresh');
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
 
     expect(requestMock).toHaveBeenCalledWith('thread/resume', {
-      threadId: 'persisted-fresh-thread',
+      threadId: 'legacy-thread',
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
@@ -854,10 +886,60 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       excludeTurns: true,
       persistExtendedHistory: true,
     });
-    expect(requestMock).not.toHaveBeenCalledWith(
-      'thread/start',
-      expect.anything(),
-    );
+    const threadWrite = fsMocks.writeFileSync.mock.calls.find((call) => String(call[0]).includes('codex-app-server-thread.json'));
+    expect(threadWrite?.[1]).toContain('"agentName": "codex-app-agent"');
+    expect(pty.getOutputBuffer().getRecent()).toContain('legacy thread state has no owner');
+  });
+
+  it('starts a fresh thread when persisted state belongs to another agent', async () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({
+      threadId: 'sibling-thread',
+      cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      agentName: 'lantern-cfo',
+      org: 'acme',
+      stateSchemaVersion: 2,
+      updatedAt: '2026-05-07T00:00:00Z',
+    }));
+    requestMock.mockImplementation((method: string) => {
+      if (method === 'thread/resume') throw new Error('must not resume sibling-owned thread');
+      if (method === 'thread/start') return Promise.resolve({ result: { thread: { id: 'fresh-after-owner-mismatch' } } });
+      return Promise.resolve({ result: {} });
+    });
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
+
+    const methods = requestMock.mock.calls.map((c) => c[0]);
+    expect(methods).not.toContain('thread/resume');
+    expect(methods).toContain('thread/start');
+    expect(fsMocks.unlinkSync).toHaveBeenCalledWith(expect.stringContaining('codex-app-server-thread.json'));
+    expect(pty.getOutputBuffer().getRecent()).toContain('ignoring persisted thread owned by agent "lantern-cfo"');
+    expect((pty as unknown as { _threadId: string })._threadId).toBe('fresh-after-owner-mismatch');
+  });
+
+  it('fresh mode clears persisted state and starts a fresh thread', async () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({
+      threadId: 'persisted-fresh-thread',
+      cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      agentName: 'codex-app-agent',
+      org: 'acme',
+      stateSchemaVersion: 2,
+      updatedAt: '2026-05-07T00:00:00Z',
+    }));
+    requestMock.mockResolvedValue({ result: { thread: { id: 'fresh-replacement-thread' } } });
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('fresh');
+
+    const methods = requestMock.mock.calls.map((c) => c[0]);
+    expect(methods).not.toContain('thread/resume');
+    expect(methods).toContain('thread/start');
+    expect(fsMocks.unlinkSync).toHaveBeenCalledWith(expect.stringContaining('codex-app-server-thread.json'));
+    expect((pty as unknown as { _threadId: string })._threadId).toBe('fresh-replacement-thread');
   });
 });
 
@@ -937,9 +1019,9 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
 
     expect(atomicWriteSyncMock).toHaveBeenCalledTimes(1);
     const [path] = atomicWriteSyncMock.mock.calls[0];
-    expect(path).toBe('/tmp/ctx/state/codex-app-agent/context_status.json');
+    expect(normalizePath(path)).toBe('/tmp/ctx/state/codex-app-agent/context_status.json');
     const payload = lastWrittenPayload()!;
-    expect(payload.used_percentage).toBeCloseTo(35, 5);
+    expect(payload.used_percentage).toBeCloseTo(29.5, 5);
     expect(payload.context_window_size).toBe(200000);
     expect(payload.exceeds_200k_tokens).toBe(false);
     expect(payload.session_id).toBe('thread-9');
@@ -1080,7 +1162,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
 
     expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
     const [path, line] = fsMocks.appendFileSync.mock.calls[0] as [string, string];
-    expect(path).toBe('/tmp/ctx/logs/codex-app-agent/codex-tokens.jsonl');
+    expect(normalizePath(path)).toBe('/tmp/ctx/logs/codex-app-agent/codex-tokens.jsonl');
     expect(line.endsWith('\n')).toBe(true);
 
     const entry = lastAppendedEntry()!;

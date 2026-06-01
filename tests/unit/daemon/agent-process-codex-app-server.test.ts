@@ -120,6 +120,49 @@ describe('AgentProcess codex-app-server runtime', () => {
     expect(ap.getStatus().pid).toBe(24680);
   });
 
+  it('injects authoritative agent identity into fresh Codex prompts', async () => {
+    const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('AUTHORITATIVE IDENTITY');
+    expect(prompt).toContain('Cortex agent named "codex-app-agent"');
+    expect(prompt).toContain('org "acme"');
+    expect(prompt).toContain('CTX_AGENT_NAME is "codex-app-agent"');
+    expect(prompt).toContain('Do not adopt identity');
+  });
+
+  it('injects authoritative agent identity into continue Codex prompts', async () => {
+    const codexThreadPath = '/tmp/test-ctx/state/codex-app-agent/codex-app-server-thread.json';
+    fsMocks.existsSync.mockImplementation((path: string) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.endsWith('.force-fresh')) return false;
+      if (normalized === codexThreadPath) return true;
+      return false;
+    });
+
+    const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(mockCodexAppServerPty.spawn).toHaveBeenCalledWith('continue', expect.any(String));
+    expect(prompt).toContain('SESSION CONTINUATION');
+    expect(prompt).toContain('AUTHORITATIVE IDENTITY');
+    expect(prompt).toContain('Cortex agent named "codex-app-agent"');
+  });
+
+  it('summarizes IDENTITY.md in the Codex boot prompt when present', async () => {
+    fsMocks.existsSync.mockImplementation((path: string) => String(path).endsWith('IDENTITY.md'));
+    fsMocks.readFileSync.mockReturnValue(`# Lantern Command
+Owns Lantern command center routing.`);
+
+    const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
+    await ap.start();
+
+    const prompt = mockCodexAppServerPty.spawn.mock.calls[0]?.[1] ?? '';
+    expect(prompt).toContain('IDENTITY.md summary: Lantern Command Owns Lantern command center routing.');
+  });
+
   it('wires Telegram handle to CodexAppServerPTY before start', async () => {
     const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
     const api = { sendChatAction: vi.fn().mockResolvedValue(undefined) };
@@ -208,8 +251,9 @@ describe('AgentProcess codex-app-server runtime', () => {
 
     // Stale Claude JSONL present but no codex-app-server thread state → fresh.
     fsMocks.existsSync.mockImplementation((path: string) => {
-      if (path.endsWith('.force-fresh')) return false;
-      if (path === codexThreadPath) return false;
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.endsWith('.force-fresh')) return false;
+      if (normalized === codexThreadPath) return false;
       return false;
     });
     const apFresh = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
@@ -219,8 +263,9 @@ describe('AgentProcess codex-app-server runtime', () => {
     // Codex thread state present → continue.
     mockCodexAppServerPty.spawn.mockClear();
     fsMocks.existsSync.mockImplementation((path: string) => {
-      if (path.endsWith('.force-fresh')) return false;
-      if (path === codexThreadPath) return true;
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.endsWith('.force-fresh')) return false;
+      if (normalized === codexThreadPath) return true;
       return false;
     });
     const apContinue = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });

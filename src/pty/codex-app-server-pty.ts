@@ -68,6 +68,9 @@ function wrapChildProcess(child: ChildProcessWithoutNullStreams): IPty {
 interface ThreadState {
   threadId: string;
   cwd: string;
+  agentName?: string;
+  org?: string;
+  stateSchemaVersion?: number;
   updatedAt: string;
 }
 
@@ -883,6 +886,9 @@ export class CodexAppServerPTY {
     const state: ThreadState = {
       threadId,
       cwd: this._cwd,
+      agentName: this._env.agentName,
+      org: this._env.org,
+      stateSchemaVersion: 2,
       updatedAt: new Date().toISOString(),
     };
     writeFileSync(this._threadStatePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
@@ -1017,7 +1023,31 @@ export class CodexAppServerPTY {
     if (!existsSync(this._threadStatePath)) return null;
     try {
       const parsed = JSON.parse(readFileSync(this._threadStatePath, 'utf-8')) as ThreadState;
-      return parsed.cwd === this._cwd && parsed.threadId ? parsed : null;
+      if (parsed.cwd !== this._cwd || !parsed.threadId) return null;
+
+      if (parsed.agentName && parsed.agentName !== this._env.agentName) {
+        this._outputBuffer.push(
+          `[codex-app-server] ignoring persisted thread owned by agent "${parsed.agentName}" for "${this._env.agentName}"\n`,
+        );
+        this.clearThreadState();
+        return null;
+      }
+
+      if (parsed.org && parsed.org !== this._env.org) {
+        this._outputBuffer.push(
+          `[codex-app-server] ignoring persisted thread owned by org "${parsed.org}" for "${this._env.org}"\n`,
+        );
+        this.clearThreadState();
+        return null;
+      }
+
+      if (!parsed.agentName) {
+        this._outputBuffer.push(
+          `[codex-app-server] legacy thread state has no owner; resuming once and stamping owner "${this._env.agentName}"\n`,
+        );
+      }
+
+      return parsed;
     } catch {
       return null;
     }
