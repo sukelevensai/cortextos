@@ -213,6 +213,7 @@ export class CodexAppServerPTY {
       if (content) {
         this.handleInput(content).catch((err) => {
           this._outputBuffer.push(`[codex-app-server] input failed: ${err}\n`);
+          this.emitTurnFailureEvent('codex_app_server_turn_failure', 'input', String(err));
         });
       }
     } else {
@@ -653,6 +654,7 @@ export class CodexAppServerPTY {
     if (!this._executing) {
       this.drainQueue().catch((err) => {
         this._outputBuffer.push(`[codex-app-server] turn queue failed: ${err}\n`);
+        this.emitTurnFailureEvent('codex_app_server_turn_failure', 'turn_queue', String(err));
       });
     }
   }
@@ -807,6 +809,7 @@ export class CodexAppServerPTY {
         break;
       case 'error':
         this._outputBuffer.push(`[codex-app-server] error: ${JSON.stringify(params)}\n`);
+        this.emitTurnFailureEvent('codex_app_server_error', 'error_notification', JSON.stringify(params));
         this.rejectTurnCompletion(new Error(JSON.stringify(params)));
         break;
       case 'thread/tokenUsage/updated':
@@ -878,6 +881,36 @@ export class CodexAppServerPTY {
       );
     } catch {
       // OutputBuffer warning above is the user-visible fallback.
+    }
+  }
+
+  /**
+   * Surface a turn/input failure as an `error`-category event so it reaches the
+   * dashboard activity feed and operator alerts. Without this, the matching
+   * `_outputBuffer.push` only reaches PM2 stdout, so a turn that times out or
+   * errors after the inbound message was already ACKed is invisible (GAP-0065).
+   * Mirrors `emitUnsupportedRequestEvent`: never throws (it runs inside `.catch`
+   * handlers); the `_outputBuffer` message is the user-visible fallback.
+   */
+  private emitTurnFailureEvent(eventType: string, stage: string, detail: string): void {
+    try {
+      const paths = resolvePaths(this._env.agentName, this._env.instanceId, this._env.org);
+      logEvent(
+        paths,
+        this._env.agentName,
+        this._env.org,
+        'error',
+        eventType,
+        'error',
+        {
+          runtime: 'codex-app-server',
+          stage,
+          detail,
+          thread_id: this._threadId,
+        },
+      );
+    } catch {
+      // OutputBuffer message above is the user-visible fallback.
     }
   }
 

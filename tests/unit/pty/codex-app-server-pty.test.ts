@@ -975,6 +975,50 @@ describe('CodexAppServerPTY event handling', () => {
     expect(pty.getOutputBuffer().getRecent()).toContain('unsupported request');
   });
 
+  it('emits an error event when the app-server sends an error notification (GAP-0065)', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { handleRpcMessage(message: unknown): void }).handleRpcMessage({
+      method: 'error',
+      params: { message: 'turn blew up' },
+    });
+    expect(logEventMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'codex-app-agent',
+      'acme',
+      'error',
+      'codex_app_server_error',
+      'error',
+      {
+        runtime: 'codex-app-server',
+        stage: 'error_notification',
+        detail: JSON.stringify({ message: 'turn blew up' }),
+        thread_id: null,
+      },
+    );
+    expect(pty.getOutputBuffer().getRecent()).toContain('[codex-app-server] error:');
+  });
+
+  it('emits a turn_failure event when a queued turn rejects (GAP-0065)', async () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    // No thread id -> startTurn throws -> drainQueue rejects -> queueTurn .catch fires.
+    (pty as unknown as { _alive: boolean })._alive = true;
+    (pty as unknown as { queueTurn(input: unknown[]): void }).queueTurn([{ type: 'text', text: 'hi' }]);
+    await new Promise((r) => setImmediate(r));
+    expect(logEventMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'codex-app-agent',
+      'acme',
+      'error',
+      'codex_app_server_turn_failure',
+      'error',
+      expect.objectContaining({
+        runtime: 'codex-app-server',
+        stage: 'turn_queue',
+      }),
+    );
+    expect(pty.getOutputBuffer().getRecent()).toContain('turn queue failed');
+  });
+
   it('fires Telegram typing from streamed assistant deltas', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
     const api = { sendChatAction: vi.fn().mockResolvedValue(undefined) };
