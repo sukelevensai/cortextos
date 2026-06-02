@@ -311,7 +311,15 @@ export const addAgentCommand = new Command('add-agent')
       if (existsSync(enabledPath)) {
         enabledAgents = JSON.parse(readFileSync(enabledPath, 'utf-8'));
       }
-    } catch { /* start fresh */ }
+    } catch (e) {
+      // GAP-0031: enabled-agents.json EXISTS but is corrupt (truncated, interrupted
+      // atomic write, bad manual edit). Resetting to {} and overwriting below would
+      // WIPE every previously-registered agent. Abort instead so the file is
+      // preserved for recovery.
+      console.error(`Error: ${enabledPath} is corrupt (${(e as Error).message}).`);
+      console.error(`Refusing to register ${name} - overwriting would unregister every other agent. Fix or remove enabled-agents.json, then re-run.`);
+      process.exit(1);
+    }
 
     if (!enabledAgents[name]) {
       enabledAgents[name] = {

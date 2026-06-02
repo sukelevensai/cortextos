@@ -162,7 +162,14 @@ export const importAgentCommand = new Command('import-agent')
       if (existsSync(enabledPath)) {
         enabledAgents = JSON.parse(readFileSync(enabledPath, 'utf-8'));
       }
-    } catch { /* start fresh */ }
+    } catch (e) {
+      // GAP-0031: enabled-agents.json EXISTS but is corrupt. Resetting to {} and
+      // overwriting below would WIPE every previously-registered agent. Abort
+      // (and clean up the import tmp dir) so the file is preserved for recovery.
+      console.error(`Error: ${enabledPath} is corrupt (${(e as Error).message}). Refusing to register ${agentName} - overwriting would unregister every other agent. Fix or remove enabled-agents.json, then re-run.`);
+      cleanup(tmpDir);
+      process.exit(1);
+    }
     enabledAgents[agentName] = { enabled: true, status: 'configured', org };
     mkdirSync(join(ctxRoot, 'config'), { recursive: true });
     writeFileSync(enabledPath, JSON.stringify(enabledAgents, null, 2) + '\n', 'utf-8');
