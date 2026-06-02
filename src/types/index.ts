@@ -81,7 +81,10 @@ export type EventCategory =
   | 'message'
   | 'task'
   | 'approval'
-  | 'agent_activity';
+  | 'agent_activity'
+  // GAP-0053: 'pipeline' is a first-class recurring-report category (crm-ops
+  // daily-pipeline-report). Was rejected at runtime, losing the event every run.
+  | 'pipeline';
 
 export type EventSeverity = 'info' | 'warning' | 'error' | 'critical';
 

@@ -36,7 +36,9 @@ export function validatePriority(priority: string): asserts priority is Priority
 }
 
 const VALID_CATEGORIES: EventCategory[] = [
-  'action', 'error', 'metric', 'milestone', 'heartbeat', 'message', 'task', 'approval',
+  // GAP-0053: keep IN SYNC with EventCategory in types/index.ts. agent_activity
+  // was a type member but missing here (rejected at runtime); pipeline added.
+  'action', 'error', 'metric', 'milestone', 'heartbeat', 'message', 'task', 'approval', 'agent_activity', 'pipeline',
 ];
 
 export function validateEventCategory(category: string): asserts category is EventCategory {
