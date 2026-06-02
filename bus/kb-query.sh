@@ -119,12 +119,29 @@ run_query() {
 }
 
 if [[ -n "$COLLECTION" ]]; then
-  # Single collection query (redirect Python warnings to /dev/null)
-  run_query "$COLLECTION" 2>/dev/null
+  # Single collection query. Let stderr flow (GAP-0060): under set -e a backend
+  # failure already exits non-zero, but swallowing stderr hid the diagnostics.
+  run_query "$COLLECTION"
 else
-  # "all" scope: query shared + agent-private if agent set
-  run_query "shared-${ORG}" 2>/dev/null || true
+  # "all" scope: query shared + agent-private if agent set.
+  # GAP-0060: a backend failure (ChromaDB down / expired GEMINI_API_KEY / schema
+  # mismatch) must NOT be masked as "no results". Drop the stderr-swallow + the
+  # `|| true`; count attempts vs failures and exit 1 only when EVERY collection
+  # errored (a legitimately-empty result still exits 0).
+  attempted=0
+  failed=0
+  if ! run_query "shared-${ORG}"; then
+    failed=$((failed + 1))
+  fi
+  attempted=$((attempted + 1))
   if [[ -n "$AGENT" ]]; then
-    run_query "agent-${AGENT}" 2>/dev/null || true
+    if ! run_query "agent-${AGENT}"; then
+      failed=$((failed + 1))
+    fi
+    attempted=$((attempted + 1))
+  fi
+  if [[ "$failed" -gt 0 && "$failed" -eq "$attempted" ]]; then
+    echo "ERROR: all knowledge-base collections failed to query - backend error, not empty results. Check ChromaDB and GEMINI_API_KEY." >&2
+    exit 1
   fi
 fi
