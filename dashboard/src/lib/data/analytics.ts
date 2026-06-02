@@ -2,6 +2,7 @@
 // Aggregated metrics for charts on the analytics page.
 
 import { db } from '@/lib/db';
+import { queryAll } from './db-query';
 import type { AgentStat } from '@/components/analytics/agent-effectiveness';
 
 /**
@@ -24,18 +25,15 @@ export function getTaskThroughput(
 
   const where = `WHERE ${conditions.join(' AND ')}`;
 
-  try {
-    return db
-      .prepare(
-        `SELECT DATE(completed_at) as date, COUNT(*) as tasks
+  return queryAll(
+    `SELECT DATE(completed_at) as date, COUNT(*) as tasks
          FROM tasks ${where}
          GROUP BY DATE(completed_at)
          ORDER BY date ASC`,
-      )
-      .all(...params) as Array<{ date: string; tasks: number }>;
-  } catch {
-    return [];
-  }
+    [...params],
+    (r) => ({ date: r.date as string, tasks: r.tasks as number }),
+    'analytics',
+  );
 }
 
 /**

@@ -2,6 +2,7 @@
 // Reads from SQLite (synced from JSON task files on disk).
 
 import { db } from '@/lib/db';
+import { queryAll } from './db-query';
 import type { Task, TaskFilters } from '@/lib/types';
 
 /**
@@ -47,21 +48,15 @@ export function getTasks(filters?: TaskFilters): Task[] {
   const where =
     conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  try {
-    const rows = db
-      .prepare(
-        `SELECT id, title, description, status, priority, assignee, org, project,
+  return queryAll(
+    `SELECT id, title, description, status, priority, assignee, org, project,
                 needs_approval, created_at, updated_at, completed_at, notes, source_file
          FROM tasks ${where}
-         ORDER BY created_at DESC`
-      )
-      .all(...params) as Record<string, unknown>[];
-
-    return rows.map(rowToTask);
-  } catch (err) {
-    console.error('[data/tasks] getTasks error:', err);
-    return [];
-  }
+         ORDER BY created_at DESC`,
+    [...params],
+    rowToTask,
+    'tasks',
+  );
 }
 
 /**
@@ -116,21 +111,15 @@ export function getTasksCompletedToday(org?: string): Task[] {
 
   const where = `WHERE ${conditions.join(' AND ')}`;
 
-  try {
-    const rows = db
-      .prepare(
-        `SELECT id, title, description, status, priority, assignee, org, project,
+  return queryAll(
+    `SELECT id, title, description, status, priority, assignee, org, project,
                 needs_approval, created_at, updated_at, completed_at, notes, source_file
          FROM tasks ${where}
-         ORDER BY completed_at DESC`
-      )
-      .all(...params) as Record<string, unknown>[];
-
-    return rows.map(rowToTask);
-  } catch (err) {
-    console.error('[data/tasks] getTasksCompletedToday error:', err);
-    return [];
-  }
+         ORDER BY completed_at DESC`,
+    [...params],
+    rowToTask,
+    'tasks',
+  );
 }
 
 /**
