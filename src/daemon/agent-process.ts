@@ -108,6 +108,24 @@ export class AgentProcess {
 
     // Determine start mode
     const mode = this.shouldContinue() ? 'continue' : 'fresh';
+    // Phantom context-warning guard: a 'fresh' session is assigned a NEW
+    // session_id, so any existing context_status.json belongs to the prior
+    // (now-dead) session. The daemon's context monitor (fast-checker) keys its
+    // staleness guard on written_at (time) and its new-session reset on a
+    // session_id CHANGE -- neither catches a recent file that still carries the
+    // OLD session_id, so the dead session's high reading would fire a phantom
+    // warning into the fresh low-context session before its first real reading
+    // is written. Delete it here so the next poll sees no stale value. On
+    // 'continue' the same session resumes and its reading is still valid -- keep it.
+    if (mode === 'fresh') {
+      const ctxStatusPath = join(this.env.ctxRoot, 'state', this.name, 'context_status.json');
+      try {
+        if (existsSync(ctxStatusPath)) {
+          unlinkSync(ctxStatusPath);
+          this.log('Cleared stale context_status.json for fresh session (phantom-warning guard)');
+        }
+      } catch { /* non-fatal */ }
+    }
     const prompt = mode === 'fresh'
       ? this.buildStartupPrompt()
       : this.buildContinuePrompt();

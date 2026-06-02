@@ -59,6 +59,7 @@ vi.mock('../../../src/utils/paths.js', () => ({
 
 const fsMocks = {
   existsSync: vi.fn().mockReturnValue(false),
+  unlinkSync: vi.fn(),
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
   appendFileSync: vi.fn(),
@@ -70,7 +71,7 @@ vi.mock('fs', async () => {
   return {
     ...actual,
     mkdirSync: vi.fn(),
-    unlinkSync: vi.fn(),
+    get unlinkSync() { return fsMocks.unlinkSync; },
     get existsSync() { return fsMocks.existsSync; },
     get readFileSync() { return fsMocks.readFileSync; },
     get writeFileSync() { return fsMocks.writeFileSync; },
@@ -105,6 +106,7 @@ beforeEach(() => {
   mockCodexAppServerPty.setTelegramHandle.mockClear();
   mockInjectMessage.mockClear();
   fsMocks.existsSync.mockReset().mockReturnValue(false);
+  fsMocks.unlinkSync.mockReset();
   fsMocks.readFileSync.mockReset();
   fsMocks.writeFileSync.mockReset();
   fsMocks.appendFileSync.mockReset();
@@ -271,6 +273,22 @@ Owns Lantern command center routing.`);
     const apContinue = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
     await apContinue.start();
     expect(mockCodexAppServerPty.spawn).toHaveBeenLastCalledWith('continue', expect.any(String));
+  });
+
+  it('clears stale context_status.json on a fresh start (phantom context-warning guard)', async () => {
+    // Fresh mode (no .force-fresh, no codex thread). context_status.json EXISTS,
+    // left by the prior now-dead session. The guard must delete it so the dead
+    // session reading cannot fire a phantom high-context warning into the fresh
+    // low-context session before its first real statusline reading is written.
+    fsMocks.existsSync.mockImplementation((p) => {
+      const s = String(p).replace(/\\/g, '/');
+      if (s.endsWith('context_status.json')) return true;
+      return false;
+    });
+    const ap = new AgentProcess('alice', mockEnv, { runtime: 'codex-app-server' });
+    await ap.start();
+    const unlinked = fsMocks.unlinkSync.mock.calls.map((call) => String(call[0]).replace(/\\/g, '/'));
+    expect(unlinked.some((p) => p.endsWith('state/alice/context_status.json'))).toBe(true);
   });
 });
 
