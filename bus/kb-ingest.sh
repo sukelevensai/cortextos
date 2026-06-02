@@ -109,19 +109,27 @@ export MMRAG_CONFIG="$CONFIG_FILE"
 export GEMINI_API_KEY
 
 echo "Ingesting into collection: $COLLECTION"
+# GAP-0061: validate each path exists + coerce to ABSOLUTE before ingest.
+# mmrag.py silently no-ops on a relative path under --scope shared (ingests
+# nothing) yet exits 0, so the wrapper would print "Ingest complete" on a
+# false success. Fail loudly on a missing path; pass only absolute paths.
+RESOLVED_PATHS=()
 for path in "${PATHS[@]}"; do
-  echo "  Source: $path"
+  if [[ ! -e "$path" ]]; then
+    echo "ERROR: path not found: $path" >&2
+    exit 1
+  fi
+  abs="$(cd "$(dirname "$path")" && pwd -P)/$(basename "$path")"
+  echo "  Source: $abs"
+  RESOLVED_PATHS+=("$abs")
 done
 
-"$VENV_DIR/bin/python3" "$MMRAG_PY" ingest "${PATHS[@]}" \
+"$VENV_DIR/bin/python3" "$MMRAG_PY" ingest "${RESOLVED_PATHS[@]}" \
   --collection "$COLLECTION" \
   ${FORCE}
 
-exit_code=$?
-if [[ $exit_code -eq 0 ]]; then
-  echo ""
-  echo "Ingest complete → collection: $COLLECTION"
-else
-  echo "Ingest failed (exit $exit_code)"
-  exit $exit_code
-fi
+# Under set -e a nonzero python exit already aborts above with that code, so
+# reaching here means ingest succeeded (GAP-0061: the old exit_code/else branch
+# was dead - a python failure never fell through to it).
+echo ""
+echo "Ingest complete → collection: $COLLECTION"
