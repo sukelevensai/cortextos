@@ -36,7 +36,7 @@ import type { CronDefinition } from '../../../src/types/index';
 const mockIpcSend = vi.fn().mockResolvedValue({ success: true, data: 'mocked' });
 const mockIpcIsDaemonRunning = vi.fn().mockResolvedValue(true);
 
-vi.mock('../../../src/daemon/ipc-server.js', () => {
+vi.mock('../../../src/daemon/ipc-client.js', () => { // GAP-0092: branch moved IPCClient ipc-server.js -> ipc-client.js; mock the module bus.ts actually imports
   // Must use a real class so `new IPCClient(...)` works.
   class MockIPCClient {
     send = mockIpcSend;
