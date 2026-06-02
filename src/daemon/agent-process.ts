@@ -728,7 +728,11 @@ export class AgentProcess {
       try {
         const { writeFileSync } = require('fs');
         writeFileSync(onboardedPath, '', 'utf-8');
-      } catch { /* ignore */ }
+      } catch (e) {
+        // GAP-0026: silent fail here makes the agent re-run onboarding on the next
+        // restart (the marker that suppresses re-onboarding never persisted).
+        process.stderr.write(`agent-process: WARNING failed to write .onboarded marker for ${this.name}; agent may re-onboard next restart: ${(e as Error).message}\n`);
+      }
     }
 
     if (!existsSync(onboardedPath) && existsSync(onboardingPath)) {
