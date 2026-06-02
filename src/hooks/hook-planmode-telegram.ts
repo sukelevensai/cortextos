@@ -1,8 +1,10 @@
-
 /**
  * hook-planmode-telegram.ts - ExitPlanMode PermissionRequest hook
- * Reads the plan file, sends it to Telegram with Approve/Deny buttons.
- * Timeout: 1800s (30 min), auto-allows so agents are not stranded if user is away.
+ * Binds the plan (inline -> planFilePath -> mtime fallback), sends it to Telegram
+ * with Approve/Deny buttons. Timeout: 1800s (30 min). For a verifiably-bound plan,
+ * a send outage or timeout AUTO-ALLOWS so agents are not stranded. For an
+ * UNVERIFIABLE 'missing' source there is nothing to review, so outage/timeout fail
+ * CLOSED (deny) -- never silently allow an unverified plan (GAP-0083).
  */
 
 import { TelegramAPI } from '../telegram/api';
@@ -16,53 +18,22 @@ import {
   buildPlanKeyboard,
   cleanupResponseFile,
 } from './index';
-import { createHash } from 'crypto';
 import { appendFile } from 'fs/promises';
-import { dirname, join, resolve } from 'path';
-import { mkdirSync, existsSync, readdirSync, statSync } from 'fs';
-import { homedir } from 'os';
-import { readFileTextStripped } from '../utils/strip-bom.js';
-
-type RawHookInput = {
-  session_id?: string;
-  transcript_path?: string;
-  cwd?: string;
-  tool_name?: string;
-  tool_input?: Record<string, unknown>;
-};
-
-type PlanSource =
-  | {
-      source: 'file';
-      path: string;
-      content: string;
-      hash: string;
-      chars: number;
-      excerpt: string;
-    }
-  | {
-      source: 'inline';
-      path: null;
-      content: string;
-      hash: string;
-      chars: number;
-      excerpt: string;
-    }
-  | {
-      source: 'missing';
-      path: string | null;
-      reason: string;
-      content: '';
-      hash: null;
-      chars: 0;
-      excerpt: '';
-    };
+import { dirname, join } from 'path';
+import { mkdirSync } from 'fs';
+import {
+  resolvePlanSource,
+  type PlanSource,
+  type RawHookInput,
+} from './planmode-resolve.js';
 
 type PlanAuditOutcome =
   | 'requested'
   | 'approved'
   | 'denied'
-  | 'missing_plan_denied'
+  | 'missing_send_failed_denied'
+  | 'missing_timeout_denied'
+  | 'missing_invalid_response_denied'
   | 'timeout_auto_allowed'
   | 'send_failed_auto_allowed'
   | 'invalid_response_auto_allowed'
@@ -74,113 +45,6 @@ function parseRawHookInput(input: string): RawHookInput {
   } catch {
     return {};
   }
-}
-
-function asString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function hashContent(content: string): string {
-  return createHash('sha256').update(content).digest('hex');
-}
-
-function redactPlanExcerpt(content: string): string {
-  return content
-    .replace(/(Bearer\s+)[A-Za-z0-9._-]{16,}/gi, '$1[REDACTED]')
-    .replace(/\b(sk-[A-Za-z0-9_-]{12,}|pat-na1-[A-Za-z0-9_-]{12,}|xox[abprs]-[A-Za-z0-9-]{12,})\b/g, '[REDACTED_TOKEN]')
-    .replace(/\b\d{8,}:[A-Za-z0-9_-]{20,}\b/g, '[REDACTED_BOT_TOKEN]')
-    .slice(0, 1200);
-}
-
-function buildContentSource(source: 'file', path: string, content: string): PlanSource;
-function buildContentSource(source: 'inline', path: null, content: string): PlanSource;
-function buildContentSource(source: 'file' | 'inline', path: string | null, content: string): PlanSource {
-  const base = {
-    content,
-    hash: hashContent(content),
-    chars: content.length,
-    excerpt: redactPlanExcerpt(content),
-  };
-
-  if (source === 'file') {
-    return { source, path: path as string, ...base };
-  }
-
-  return { source, path: null, ...base };
-}
-
-/**
- * Find the most recent plan file in ~/.claude/plans/ (newest .md by mtime).
- * Restored as the GAP-0083 safe fallback: when a hook fires with no inline plan
- * and no explicit planFilePath (e.g. a real plan-mode exit arriving with empty
- * stdin), degrade to the newest plan on disk rather than denying. The chosen
- * plan still goes through Telegram human review downstream.
- */
-function findMostRecentPlan(): string | null {
-  const plansDir = join(homedir(), '.claude', 'plans');
-  if (!existsSync(plansDir)) return null;
-  try {
-    const files = readdirSync(plansDir)
-      .filter((f) => f.endsWith('.md'))
-      .map((f) => ({
-        path: join(plansDir, f),
-        mtime: statSync(join(plansDir, f)).mtimeMs,
-      }))
-      .sort((a, b) => b.mtime - a.mtime);
-    return files.length > 0 ? files[0].path : null;
-  } catch {
-    return null;
-  }
-}
-
-function resolvePlanSource(raw: RawHookInput, toolInput: Record<string, unknown>): PlanSource {
-  // (1) Inline plan content is the authoritative current plan and is almost
-  //     always present on a real ExitPlanMode call. Prefer it over anything on
-  //     disk so we review exactly what the agent is exiting with.
-  const inlinePlan =
-    asString(toolInput.plan) ||
-    asString(toolInput.plan_text) ||
-    asString(toolInput.content);
-  if (inlinePlan) {
-    return buildContentSource('inline', null, inlinePlan);
-  }
-
-  // (2) Explicit plan file. The runtime sends the camelCase `planFilePath`; the
-  //     previous `plan_file`/`planPath` keys never matched (GAP-0083), so every
-  //     call fell through to the deny path.
-  const planFile = asString(toolInput.planFilePath);
-  if (planFile) {
-    const planPath = resolve(planFile);
-    if (existsSync(planPath)) {
-      const content = readFileTextStripped(planPath);
-      return buildContentSource('file', planPath, content);
-    }
-    // Named file is gone -- fall through to the mtime fallback rather than deny.
-  }
-
-  // (3) SAFE fallback: newest plan on disk by mtime (the original behavior).
-  //     Empty/absent payloads happen on genuine plan-mode exits; the old
-  //     deny-all bricked those. Degrade to mtime; never auto-deny.
-  const recentPlan = findMostRecentPlan();
-  if (recentPlan) {
-    const content = readFileTextStripped(recentPlan);
-    return buildContentSource('file', recentPlan, content);
-  }
-
-  // Nothing anywhere. Still NOT denied and NOT silently allowed -- the caller
-  // routes this to Telegram for human review with a placeholder body, and the
-  // existing 30-min timeout-auto-approve remains the decider.
-  return {
-    source: 'missing',
-    path: null,
-    reason: raw.tool_name === 'ExitPlanMode'
-      ? 'no_inline_plan_no_plan_file_no_recent_plan'
-      : 'hook_input_was_not_exit_plan_mode',
-    content: '',
-    hash: null,
-    chars: 0,
-    excerpt: '',
-  };
 }
 
 function truncateForTelegram(content: string): string {
@@ -224,6 +88,7 @@ async function appendPlanAudit(
       hash: plan.hash,
       chars: plan.chars,
       excerpt: plan.excerpt,
+      provenance: plan.source === 'file' ? plan.provenance : null,
       reason: plan.source === 'missing' ? plan.reason : null,
     },
     ...extra,
@@ -235,6 +100,24 @@ async function appendPlanAudit(
   ];
 
   await Promise.allSettled(paths.map((p) => appendJsonl(p, entry)));
+}
+
+/**
+ * Build the Telegram review body. 'missing' sources get an explicit NOTICE and an
+ * mtime fallback gets a WARNING, so a human never rubber-stamps an unverified or
+ * best-guess plan as if it were the exact bound plan.
+ */
+function buildReviewBody(plan: PlanSource): string {
+  if (plan.source === 'missing' && plan.reason === 'named_plan_file_missing') {
+    return `NOTICE: the named plan file could not be found:\n${plan.path}\nThe actual plan cannot be verified. APPROVE only if you intend to allow this exit blind; otherwise DENY. (No response = denied.)`;
+  }
+  if (plan.source === 'missing') {
+    return `NOTICE: no plan content was bound to this exit (no inline plan, no plan file, no recent plan within 24h). There is nothing to verify. APPROVE only if you intend to allow this exit blind; otherwise DENY. (No response = denied.)`;
+  }
+  if (plan.source === 'file' && plan.provenance === 'mtime_fallback') {
+    return `WARNING: this is the NEWEST plan file on disk, NOT a plan explicitly bound to this exit -- it may not be what the agent is actually exiting with.\nPlan file: ${plan.path}\n\n${truncateForTelegram(plan.content)}`;
+  }
+  return truncateForTelegram(plan.content);
 }
 
 async function main(): Promise<void> {
@@ -263,13 +146,16 @@ async function main(): Promise<void> {
 
   const api = new TelegramAPI(env.botToken);
 
-  // GAP-0083: a 'missing' source (no inline plan, no planFilePath, no recent plan
-  // on disk) is NOT denied (deny-all bricks genuine empty-stdin exits) and NOT
-  // silently auto-allowed (that would bypass human review). It falls through to
-  // the same Telegram review path below with a placeholder body, so the human --
-  // or the existing 30-min timeout-auto-approve -- stays the decider.
+  // GAP-0083 fail direction. When no plan could be verifiably bound (source
+  // 'missing': nothing inline, no recent plan within 24h, OR an explicitly named
+  // planFilePath that has vanished), there is no reviewable content -- so a send
+  // failure or a review timeout must fail CLOSED (deny), never silently allow. For
+  // a real bound plan the existing fail-open-on-outage behavior stands so a Telegram
+  // hiccup does not strand the agent. Principle: never silently brick a legit exit,
+  // never silently allow an unverified/substitute plan.
+  const failClosed = plan.source === 'missing';
 
-  const messageText = `PLAN REVIEW - ${env.agentName}\nPlan source: ${plan.source}${plan.path ? `\nPlan file: ${plan.path}` : ''}\nPlan hash: ${plan.hash}\n\n${truncateForTelegram(plan.content || '(No plan content found - inline plan, planFilePath, and newest plan file on disk were all absent. Approve only if you intend to allow this exit.)')}`;
+  const messageText = `PLAN REVIEW - ${env.agentName}\nPlan source: ${plan.source}${plan.source === 'file' ? ` (${plan.provenance})` : ''}\nPlan hash: ${plan.hash ?? 'none'}\n\n${buildReviewBody(plan)}`;
   const keyboard = buildPlanKeyboard(requestId);
 
   try {
@@ -278,9 +164,15 @@ async function main(): Promise<void> {
       telegram_message_id: sent?.result?.message_id ?? null,
     });
   } catch {
-    // If send fails, auto-allow so the agent is not stranded.
-    await appendPlanAudit(env, raw, requestId, plan, 'send_failed_auto_allowed');
-    outputDecision('allow');
+    // Send failed (Telegram unreachable). Fail-closed for unverifiable plans;
+    // fail-open for a real bound plan so an outage does not strand the agent.
+    if (failClosed) {
+      await appendPlanAudit(env, raw, requestId, plan, 'missing_send_failed_denied');
+      outputDecision('deny', 'No verifiable plan was bound and Telegram is unreachable for review. Re-run plan mode with an explicit plan.');
+    } else {
+      await appendPlanAudit(env, raw, requestId, plan, 'send_failed_auto_allowed');
+      outputDecision('allow');
+    }
     return;
   }
 
@@ -304,23 +196,34 @@ async function main(): Promise<void> {
         outputDecision('deny', 'Plan denied by user via Telegram. Ask what they want to change.');
       }
     } catch {
-      await appendPlanAudit(env, raw, requestId, plan, 'invalid_response_auto_allowed');
-      outputDecision('allow');
+      // Unreadable response. Fail-closed for unverifiable plans.
+      if (failClosed) {
+        await appendPlanAudit(env, raw, requestId, plan, 'missing_invalid_response_denied');
+        outputDecision('deny', 'No verifiable plan was bound and the review response was unreadable.');
+      } else {
+        await appendPlanAudit(env, raw, requestId, plan, 'invalid_response_auto_allowed');
+        outputDecision('allow');
+      }
     }
   } else {
-    // Timeout means auto-allowed, not human-approved.
-    await appendPlanAudit(env, raw, requestId, plan, 'timeout_auto_allowed', {
-      timeout_ms: TIMEOUT_MS,
-    });
-    try {
-      await api.sendMessage(
-        env.chatId,
-        `Plan review TIMED OUT (auto-allowed): ${env.agentName}`,
-      );
-    } catch {
-      // Ignore notification failure
+    // Timeout. Fail-closed for unverifiable plans (never silently allow); existing
+    // auto-allow stands for a real bound plan.
+    if (failClosed) {
+      await appendPlanAudit(env, raw, requestId, plan, 'missing_timeout_denied', { timeout_ms: TIMEOUT_MS });
+      try {
+        await api.sendMessage(env.chatId, `Plan review TIMED OUT (DENIED - no verifiable plan was bound): ${env.agentName}`);
+      } catch { /* ignore notification failure */ }
+      outputDecision('deny', 'No verifiable plan was bound and the review timed out. Re-run plan mode with an explicit plan.');
+    } else {
+      await appendPlanAudit(env, raw, requestId, plan, 'timeout_auto_allowed', { timeout_ms: TIMEOUT_MS });
+      try {
+        await api.sendMessage(
+          env.chatId,
+          `Plan review TIMED OUT (auto-allowed): ${env.agentName}`,
+        );
+      } catch { /* ignore notification failure */ }
+      outputDecision('allow');
     }
-    outputDecision('allow');
   }
 }
 
