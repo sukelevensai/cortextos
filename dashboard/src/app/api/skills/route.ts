@@ -79,7 +79,7 @@ export async function GET() {
     return Response.json(skills.sort((a, b) => a.name.localeCompare(b.name)));
   } catch (err) {
     console.error('[api/skills] error:', err);
-    return Response.json([]);
+    return Response.json({ error: 'skills_catalog_unavailable', hint: 'check frameworkRoot + fs permissions' }, { status: 503 });
   }
 }
 
