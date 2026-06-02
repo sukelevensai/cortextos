@@ -124,7 +124,7 @@ export function notifyAgents(opts: {
     frameworkRoot ? join(frameworkRoot, 'dist', 'cli.js') : null,
     join(process.cwd(), 'dist', 'cli.js'),
   ].filter(Boolean) as string[];
-  const cliPath = cliCandidates.find(path => existsSync(path));
+  const cliPath = cliCandidates.find(path => existsSync(path)) ?? cliCandidates[cliCandidates.length - 1]; // GAP-0092: never skip the alert when dist is unbuilt
   for (const target of opts.recipients) {
     try {
       if (cliPath) {

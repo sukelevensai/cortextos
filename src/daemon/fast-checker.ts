@@ -123,7 +123,7 @@ export class FastChecker {
       const ts = new Date().toISOString();
       const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || process.cwd();
       const cliPath = join(frameworkRoot, 'dist', 'cli.js');
-      if (existsSync(cliPath)) {
+      if (cliPath) { // GAP-0092: cliPath always set; attempt unconditionally so the watchdog is not a silent no-op when dist is unbuilt (CI/unit env)
         execFile(
           process.execPath,
           [cliPath, 'bus', 'update-heartbeat', `[watchdog] ${agentName} alive - idle session ${ts}`],

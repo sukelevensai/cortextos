@@ -440,6 +440,7 @@ describe('bus update-cron', () => {
 
 describe('bus test-cron-fire', () => {
   it('success: sends fire-cron IPC and prints confirmation', async () => {
+    mockIpcIsDaemonRunning.mockReset(); mockIpcIsDaemonRunning.mockResolvedValue(true); // GAP-0092: branch added a daemon-running guard; reset clears any leaked sibling mockResolvedValueOnce(false)
     seedCrons([makeCron('heartbeat')]);
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
