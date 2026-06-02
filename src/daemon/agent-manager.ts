@@ -376,6 +376,12 @@ export class AgentManager {
         telegramApi = new TelegramAPI(botToken);
         // Don't log sensitive user IDs — just indicate the gate is enabled
         log(`Telegram configured (chat_id: ****${String(chatId).slice(-4)}, allowed_user: enabled)`);
+      } else if (botToken && !chatId) {
+        // GAP-0004: BOT_TOKEN valid + ALLOWED_USER present, but CHAT_ID missing ->
+        // Telegram stays disabled. We cannot even send a watchdog alert (no chatId
+        // to send to), so without this line the agent boots Telegram-less silently.
+        // Surface it so the fleet-startup health gate (which greps WARNING) catches it.
+        log(`WARNING: BOT_TOKEN is set but CHAT_ID is missing in .env. Telegram is DISABLED for ${name}. Set CHAT_ID to the numeric Telegram chat ID, or remove BOT_TOKEN to start without Telegram.`);
       }
     }
 
