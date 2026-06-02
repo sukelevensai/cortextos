@@ -157,7 +157,12 @@ function shouldSuppressDedup(stateDir: string, endType: string): boolean {
   last[endType] = now;
   try {
     writeFileSync(dedupFile, JSON.stringify(last), 'utf-8');
-  } catch { /* ignore */ }
+  } catch (e) {
+    // GAP-0041: silent fail here bypasses dedup -> Telegram spam-flood on the
+    // next crash. stderr (not logEvent: a disk-write failure would fail the
+    // event-log write too) -> PM2 captures to cortextos-daemon-error.log.
+    process.stderr.write(`hook-crash-alert: dedup-state write failed: ${(e as Error).message}\n`);
+  }
   return false;
 }
 
@@ -320,7 +325,11 @@ async function main(): Promise<void> {
     }
     try {
       writeFileSync(countFile, `${today}:${crashCount}`, 'utf-8');
-    } catch { /* ignore */ }
+    } catch (e) {
+      // GAP-0041: silent fail leaves notifyAgents seeing a stale crashCount and
+      // a wrong restartAttempted boolean. Surface via stderr (see dedup note).
+      process.stderr.write(`hook-crash-alert: crash-count write failed: ${(e as Error).message}\n`);
+    }
   } else if (endType === 'daemon-crashed') {
     // Read-only: surface today's count to chief/analyst without mutating it.
     try {
@@ -348,7 +357,13 @@ async function main(): Promise<void> {
   const logLine = `${timestamp} type=${endType} reason=${reason || 'none'} session=${sessionId || 'unknown'} last_task=${lastTask}\n`;
   try {
     appendFileSync(join(logDir, 'crashes.log'), logLine);
-  } catch { /* ignore */ }
+  } catch (e) {
+    // GAP-0041: this is the foundational persistence write. A silent fail here
+    // (disk-full / locked / permission-denied) blinds the entire alert audit
+    // trail with no fallback anywhere. stderr is the last-resort fallback (see
+    // dedup note: logEvent would fail with the same disk error).
+    process.stderr.write(`hook-crash-alert: crashes.log append failed: ${(e as Error).message}\n`);
+  }
 
   // Decide whether to actually send to Telegram.
   const now = new Date();
