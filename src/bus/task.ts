@@ -115,7 +115,13 @@ function addSymmetricEdge(
       task[field] = [...list, peerId];
       atomicWriteSync(filePath, JSON.stringify(task));
     }
-  } catch { /* best-effort */ }
+  } catch (e) {
+    // GAP-0058: a silently-lost peer edge write breaks blocks/blocked_by symmetry,
+    // so a downstream task can become claimable before its real blocker completes.
+    // Surface it (the edge is still best-effort - we do not throw and break the
+    // primary task write that already succeeded).
+    process.stderr.write(`task: WARNING failed to write symmetric ${field} edge ${peerId} onto ${taskId}; dependency graph may be asymmetric: ${(e as Error).message}\n`);
+  }
 }
 
 /**
@@ -172,7 +178,15 @@ export function checkTaskDependencies(
   if (!filePath) return [];
   let task: Task;
   try { task = JSON.parse(readFileSync(filePath, 'utf-8')) as Task; }
-  catch { return []; }
+  catch (e) {
+    // GAP-0058: the root task file EXISTS but is corrupt. Returning [] would report
+    // "no open blockers" (good-to-go) and let the task be claimed/started on
+    // unreadable data. Fail SAFE: report the task itself as an unresolved blocker
+    // (non-empty -> callers treat it as blocked) and warn, mirroring the
+    // corrupt-dependency handling below.
+    process.stderr.write(`task: WARNING task ${taskId} is corrupt at ${filePath}; treating as blocked (not good-to-go): ${(e as Error).message}\n`);
+    return [{ id: taskId, status: 'missing' }];
+  }
   const deps = task.blocked_by ?? [];
   const open: Array<{ id: string; status: TaskStatus | 'missing' }> = [];
   for (const depId of deps) {
