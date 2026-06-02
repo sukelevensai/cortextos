@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { IPCClient } from '../daemon/ipc-server.js';
+import { IPCClient } from '../daemon/ipc-client.js';
 import { writeStopMarker } from './stop.js';
 
 export const restartCommand = new Command('restart')

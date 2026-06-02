@@ -4,7 +4,7 @@ import { join, basename } from 'path';
 import { homedir, tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 import { validateAgentName } from '../utils/validate.js';
-import { IPCClient } from '../daemon/ipc-server.js';
+import { IPCClient } from '../daemon/ipc-client.js';
 import { resolvePaths } from '../utils/paths.js';
 
 interface ExportManifest {

@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { IPCClient } from '../daemon/ipc-server.js';
+import { IPCClient } from '../daemon/ipc-client.js';
 
 /**
  * BUG-036 fix: write a `.user-stop` marker before the agent's PTY is killed,
