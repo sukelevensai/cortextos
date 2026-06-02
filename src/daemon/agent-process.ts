@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { join, sep } from 'path';
 import { homedir } from 'os';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
@@ -160,7 +160,7 @@ export class AgentProcess {
         return;
       }
       this.log(`Exited with code ${exitCode} signal ${signal}`);
-      this.handleExit(exitCode);
+      this.handleExit(exitCode, signal);
       // Signal anyone awaiting this PTY's exit (e.g. stop() — BUG-011 fix)
       this.resolveExit?.();
       this.resolveExit = null;
@@ -497,7 +497,7 @@ export class AgentProcess {
     }
   }
 
-  private handleExit(exitCode: number): void {
+  private handleExit(exitCode: number, signal?: number): void {
     // Capture last 16KB of the agent's stdout BEFORE nulling pty.
     // Used by the image-poison auto-recovery check below — reads the log
     // file so this works even if the PTY buffer has already been GC'd.
@@ -600,6 +600,7 @@ export class AgentProcess {
           `CRASH_LOOP: ${this.crashTimestamps.length} crashes in ${this.crashWindowMs / 1000}s window — auto-pausing`,
         );
         this.appendCrashToRestartsLog(exitCode, 0, 'CRASH_LOOP');
+        this.writeCrashDetail('CRASH_LOOP', exitCode, signal, recentOutput);
         this.status = 'halted';
         this.notifyStatusChange();
         return;
@@ -615,6 +616,7 @@ export class AgentProcess {
     if (this.crashCount >= this.maxCrashesPerDay) {
       this.log(`HALTED: exceeded ${this.maxCrashesPerDay} crashes today`);
       this.appendCrashToRestartsLog(exitCode, 0, 'HALTED');
+      this.writeCrashDetail('HALTED', exitCode, signal, recentOutput);
       this.status = 'halted';
       this.notifyStatusChange();
       return;
@@ -628,6 +630,7 @@ export class AgentProcess {
     // bus/system.ts wrote here, which left daemon-classified crashes
     // invisible outside the rotating PM2 daemon stdout log.
     this.appendCrashToRestartsLog(exitCode, backoff, 'CRASH');
+    this.writeCrashDetail('CRASH', exitCode, signal, recentOutput);
     this.status = 'crashed';
     this.notifyStatusChange();
 
@@ -922,6 +925,44 @@ export class AgentProcess {
     }
   }
 
+  /**
+   * Persist a diagnostic snapshot when the agent process dies unexpectedly.
+   *
+   * The agent runs under a PTY, which merges stdout+stderr into one stream, so
+   * there is no separate stderr to capture. Instead we snapshot the tail of the
+   * (already secret-redacted) PTY output at crash time, ANSI stripped, alongside
+   * the exit code and signal. This turns an opaque exit_code=-1 into something an
+   * operator can actually read. Bounded + rotated so it cannot grow without limit;
+   * all errors swallowed: diagnostics must never break crash recovery.
+   */
+  private writeCrashDetail(
+    kind: 'CRASH' | 'HALTED' | 'CRASH_LOOP',
+    exitCode: number,
+    signal: number | undefined,
+    recentOutput: string,
+  ): void {
+    try {
+      const logDir = join(this.env.ctxRoot, 'logs', this.name);
+      ensureDir(logDir);
+      const detailPath = join(logDir, 'crashes-detail.log');
+      try {
+        if (statSync(detailPath).size >= 5 * 1024 * 1024) {
+          renameSync(detailPath, detailPath + '.1');
+        }
+      } catch { /* file may not exist yet - fine */ }
+      const cleaned = recentOutput
+        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07]*\x07/g, '');
+      const tail = cleaned.slice(-8192);
+      const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const header =
+        `\n===== ${kind} ${timestamp} ` +
+        `exit_code=${exitCode} signal=${signal ?? 'none'} crash_count=${this.crashCount} =====\n`;
+      appendFileSync(detailPath, header + tail + '\n', 'utf-8');
+    } catch {
+      /* swallow - never break crash recovery on a logging failure */
+    }
+  }
   /**
    * Append an unplanned-exit entry to restarts.log. Complements the planned
    * SELF-RESTART / HARD-RESTART entries written by src/bus/system.ts so that
