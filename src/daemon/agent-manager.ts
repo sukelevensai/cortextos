@@ -232,7 +232,7 @@ export class AgentManager {
     const inRegistry = this.agents.has(name);
     if (op === 'start') {
       if (inRegistry) {
-        const status = this.agents.get(name)?.process.getStatus().status;
+        const status = this.agents.get(name)?.process?.getStatus()?.status;
         if (status === 'crashed' || status === 'halted') {
           return { ok: true };
         }
@@ -249,7 +249,7 @@ export class AgentManager {
 
   async startAgent(name: string, agentDir: string, config?: AgentConfig, org?: string): Promise<void> {
     if (this.agents.has(name)) {
-      const status = this.agents.get(name)?.process.getStatus().status;
+      const status = this.agents.get(name)?.process?.getStatus()?.status;
       if (status === 'crashed' || status === 'halted') {
         console.log(`[agent-manager] ${name} is ${status} but still in registry. Treating start as recovery restart.`);
         await this.restartAgent(name);
