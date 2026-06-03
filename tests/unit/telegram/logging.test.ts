@@ -8,6 +8,7 @@ import {
   recordInboundTelegram,
   cacheLastSent,
   readLastSent,
+  verifyLatestOutboundMessage,
 } from '../../../src/telegram/logging';
 import { TelegramAPI } from '../../../src/telegram/api';
 import type { BusPaths, TelegramMessage } from '../../../src/types';
@@ -34,6 +35,8 @@ describe('Telegram Logging', () => {
       expect(entry.agent).toBe('bot1');
       expect(entry.chat_id).toBe('12345');
       expect(entry.text).toBe('Hello world');
+      expect(entry.text_chars).toBe('Hello world'.length);
+      expect(entry.text_sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(entry.message_id).toBe(99);
       expect(entry.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     });
@@ -47,6 +50,17 @@ describe('Telegram Logging', () => {
       expect(lines).toHaveLength(2);
       expect(JSON.parse(lines[0]).text).toBe('first');
       expect(JSON.parse(lines[1]).text).toBe('second');
+    });
+
+    it('verifies latest outbound log text, id, length, and hash', () => {
+      const text = 'line one\n- item two\n- item three';
+      logOutboundMessage(testDir, 'bot1', '111', text, 42);
+
+      expect(verifyLatestOutboundMessage(testDir, 'bot1', '111', text, 42)).toEqual({ ok: true });
+      expect(verifyLatestOutboundMessage(testDir, 'bot1', '111', 'line one', 42)).toEqual({
+        ok: false,
+        reason: 'text mismatch',
+      });
     });
   });
 

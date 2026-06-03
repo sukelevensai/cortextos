@@ -23,7 +23,7 @@ import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-client.js';
 import { TelegramAPI } from '../telegram/api.js';
-import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
+import { logOutboundMessage, cacheLastSent, verifyLatestOutboundMessage } from '../telegram/logging.js';
 import { evaluateTelegramEgress } from '../bus/egress-guard.js';
 
 /**
@@ -1003,11 +1003,19 @@ busCommand
   .command('send-telegram')
   .description('Send a message to a Telegram chat')
   .argument('<chat-id>', 'Telegram chat ID')
-  .argument('<message>', 'Message text (supports Telegram Markdown unless --plain-text is set)')
+  .argument('[message]', 'Message text (supports Telegram Markdown unless --plain-text is set)')
+  .option('--message-file <path>', 'Read message text from a UTF-8 file. Safer for multiline PowerShell/.cmd sends.')
   .option('--image <path>', 'Send a photo with caption')
   .option('--file <path>', 'Send a document/file with caption (any file type)')
   .option('--plain-text', 'Skip Telegram Markdown parsing entirely. Use this when the message contains unescaped _, *, backtick, or [ that would otherwise trip the Markdown parser. Without this flag, sendMessage still retries once with parse_mode disabled on a parse-entity error — so it is purely an opt-in to save the retry roundtrip.', false)
-  .action(async (chatId: string, message: string, opts: { image?: string; file?: string; plainText?: boolean }) => {
+  .action(async (chatId: string, message: string | undefined, opts: { messageFile?: string; image?: string; file?: string; plainText?: boolean }) => {
+    if (opts.messageFile) {
+      message = readFileSync(opts.messageFile, 'utf-8');
+    }
+    if (message === undefined) {
+      console.error('Error: message text required. Pass a message argument or --message-file <path>.');
+      process.exit(1);
+    }
     // Codex agents emit literal '\n'/'\t' inside single-quoted bash where bash
     // does not expand escapes, so they arrive at argv as 2-char literals and
     // Telegram renders them as visible text. Normalize before send + log.
@@ -1063,6 +1071,10 @@ busCommand
         logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId, {
           parseMode: opts.plainText ? 'none' : 'html',
         });
+        const verification = verifyLatestOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId);
+        if (!verification.ok) {
+          throw new Error(`Outbound Telegram log verification failed: ${verification.reason}`);
+        }
         cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
         // Auto-emit activity event so dashboard sees every Telegram send,
         // even from agents that never call log-event directly.
