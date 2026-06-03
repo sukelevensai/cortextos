@@ -10,6 +10,7 @@ import type { CronDefinition } from '../types/index.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
 import { resolvePaths } from '../utils/paths.js';
+import { logEvent } from '../bus/event.js';
 import { resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -407,6 +408,14 @@ export class AgentManager {
       const tgChatId = chatId;
       let prevStatus: string | null = null;
       agentProcess.onStatusChanged((status) => {
+        // GAP-0095: also surface lifecycle transitions to the dashboard activity
+        // feed (previously Telegram-only, so the audit trail went dark on
+        // crash/halt/recover). Best-effort; never blocks lifecycle handling.
+        if (status.status === 'crashed' || status.status === 'halted' || (status.status === 'running' && prevStatus === 'crashed')) {
+          try {
+            logEvent(resolvePaths(name, this.instanceId), name, resolvedOrg, 'action', (status.status === 'running' ? 'agent_recovered' : `agent_${status.status}`), status.status === 'running' ? 'info' : 'warning', { crashCount: status.crashCount ?? null, prevStatus });
+          } catch { /* best-effort event write */ }
+        }
         if (status.status === 'crashed') {
           const crashNum = status.crashCount ?? '?';
           tgApi.sendMessage(tgChatId, `Agent ${name} crashed (crash #${crashNum}) — auto-restarting`).catch(() => {});
