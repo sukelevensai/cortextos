@@ -85,13 +85,13 @@ export function getAgentEffectiveness(org?: string): AgentStat[] {
       .prepare(
         `SELECT assignee as name, DATE(completed_at) as date, COUNT(*) as count
          FROM tasks
-         WHERE completed_at >= DATE('now', '-7 days')
+         ${where ? where + ' AND' : 'WHERE'} completed_at >= DATE('now', '-7 days')
            AND status = 'completed'
            AND assignee IS NOT NULL AND assignee != ''
          GROUP BY assignee, DATE(completed_at)
          ORDER BY date ASC`,
       )
-      .all() as Array<{ name: string; date: string; count: number }>;
+      .all(...params) as Array<{ name: string; date: string; count: number }>;
 
     // Build trend map: agent -> [7 days of counts]
     const trendMap = new Map<string, number[]>();
