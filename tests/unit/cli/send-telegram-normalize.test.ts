@@ -17,7 +17,7 @@
  * fix is runtime-agnostic by construction.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -42,6 +42,9 @@ let tempCwd: string;
 let originalCtxRoot: string | undefined;
 let originalAgentName: string | undefined;
 let originalBotToken: string | undefined;
+let originalAgentDir: string | undefined;
+let originalFrameworkRoot: string | undefined;
+let originalProjectRoot: string | undefined;
 let originalCwd: string;
 
 beforeEach(() => {
@@ -55,10 +58,17 @@ beforeEach(() => {
   originalCtxRoot = process.env.CTX_ROOT;
   originalAgentName = process.env.CTX_AGENT_NAME;
   originalBotToken = process.env.BOT_TOKEN;
+  originalAgentDir = process.env.CTX_AGENT_DIR;
+  originalFrameworkRoot = process.env.CTX_FRAMEWORK_ROOT;
+  originalProjectRoot = process.env.CTX_PROJECT_ROOT;
   originalCwd = process.cwd();
   process.env.CTX_ROOT = tempCtx;
   process.env.CTX_AGENT_NAME = 'test-agent';
+  process.env.CTX_AGENT_DIR = tempCwd;
+  process.env.CTX_FRAMEWORK_ROOT = tempCwd;
+  process.env.CTX_PROJECT_ROOT = tempCwd;
   process.env.BOT_TOKEN = 'fake-token-for-test';
+  writeFileSync(join(tempCwd, '.env'), 'BOT_TOKEN=fake-token-for-test\nTELEGRAM_OUTBOUND_ALLOWED=12345\n', 'utf-8');
   process.chdir(tempCwd);
 
   sendMessageSpy.mockClear();
@@ -72,6 +82,12 @@ afterEach(() => {
   else process.env.CTX_AGENT_NAME = originalAgentName;
   if (originalBotToken === undefined) delete process.env.BOT_TOKEN;
   else process.env.BOT_TOKEN = originalBotToken;
+  if (originalAgentDir === undefined) delete process.env.CTX_AGENT_DIR;
+  else process.env.CTX_AGENT_DIR = originalAgentDir;
+  if (originalFrameworkRoot === undefined) delete process.env.CTX_FRAMEWORK_ROOT;
+  else process.env.CTX_FRAMEWORK_ROOT = originalFrameworkRoot;
+  if (originalProjectRoot === undefined) delete process.env.CTX_PROJECT_ROOT;
+  else process.env.CTX_PROJECT_ROOT = originalProjectRoot;
   rmSync(tempCtx, { recursive: true, force: true });
   rmSync(tempCwd, { recursive: true, force: true });
 });
@@ -88,6 +104,42 @@ describe('PR-12: send-telegram normalizes literal \\n / \\t (codex agent fix)', 
     expect(sentMessage).toBe('hello\n\nworld');
     // Sanity: no literal backslash-n survives.
     expect(sentMessage).not.toContain('\\n');
+  });
+
+  it('reads multiline message text from --message-file', async () => {
+    const messagePath = join(tempCwd, 'telegram-message.txt');
+    const messageText = 'line one\n- item two\n- item three';
+    writeFileSync(messagePath, messageText, 'utf-8');
+
+    await busCommand.parseAsync(
+      ['send-telegram', '12345', '--message-file', messagePath],
+      { from: 'user' },
+    );
+
+    expect(sendMessageSpy).toHaveBeenCalledTimes(1);
+    const sentMessage = sendMessageSpy.mock.calls[0][1] as string;
+    expect(sentMessage).toBe(messageText);
+
+    const outboundPath = join(tempCtx, 'logs', 'test-agent', 'outbound-messages.jsonl');
+    const outbound = JSON.parse(readFileSync(outboundPath, 'utf-8').trim().split('\n').at(-1)!);
+    expect(outbound.text).toBe(messageText);
+    expect(outbound.text_chars).toBe(messageText.length);
+    expect(outbound.text_sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('strips a UTF-8 BOM from --message-file content', async () => {
+    const messagePath = join(tempCwd, 'telegram-message-with-bom.txt');
+    writeFileSync(messagePath, '\uFEFFstarts clean after bom\nsecond line', 'utf-8');
+
+    await busCommand.parseAsync(
+      ['send-telegram', '12345', '--message-file', messagePath],
+      { from: 'user' },
+    );
+
+    expect(sendMessageSpy).toHaveBeenCalledTimes(1);
+    const sentMessage = sendMessageSpy.mock.calls[0][1] as string;
+    expect(sentMessage).toBe('starts clean after bom\nsecond line');
+    expect(sentMessage.charCodeAt(0)).not.toBe(0xfeff);
   });
 
   it('converts codex-style literal \\t into real tabs before sending', async () => {

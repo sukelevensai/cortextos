@@ -621,6 +621,19 @@ export class TelegramAPI {
       });
       const result = await response.json() as any;
       if (!result.ok) {
+        // GAP-0084: a 429 carries parameters.retry_after (seconds until the limit
+        // clears). The old throw discarded it, so rate-limited sends vanished with
+        // no signal. Fold retry_after into the error + stderr-warn. Auto-retry
+        // delivery is deferred to GAP-0084b: it must live in sendMessage, NOT here -
+        // post() is also used by validateTelegramConfig probes and the getUpdates
+        // poll loop, which depend on a 429 throwing FAST rather than blocking on
+        // retry_after. The error string keeps "Too Many Requests" so existing
+        // /Too Many Requests|429/ matchers still classify it as rate_limited.
+        const retryAfter = result.parameters?.retry_after;
+        if (retryAfter !== undefined) {
+          process.stderr.write(`telegram-api: WARNING ${method} rate-limited (429), retry_after=${retryAfter}s, message NOT sent: ${result.description || ''}\n`);
+          throw new Error(`Telegram API error: rate_limited retry_after=${retryAfter}s: ${result.description || 'Too Many Requests'}`);
+        }
         throw new Error(`Telegram API error: ${result.description || 'Unknown error'}`);
       }
       return result;

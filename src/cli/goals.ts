@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { stripBom } from '../utils/strip-bom.js';
 
 export const goalsCommand = new Command('goals')
   .description('Manage goals.json and auto-generate GOALS.md for agents');
@@ -30,7 +31,9 @@ goalsCommand
 
     let data: Record<string, unknown>;
     try {
-      data = JSON.parse(readFileSync(goalsJsonPath, 'utf-8'));
+      // GAP-0082: strip a leading UTF-8 BOM. PS5.1 Set-Content -Encoding utf8 writes a
+      // BOM by default on Windows, which makes a bare JSON.parse throw on goals.json.
+      data = JSON.parse(stripBom(readFileSync(goalsJsonPath, 'utf-8')));
     } catch {
       process.stderr.write(`Failed to parse goals.json for ${options.agent}\n`);
       process.exit(1);

@@ -36,7 +36,7 @@ import type { CronDefinition } from '../../../src/types/index';
 const mockIpcSend = vi.fn().mockResolvedValue({ success: true, data: 'mocked' });
 const mockIpcIsDaemonRunning = vi.fn().mockResolvedValue(true);
 
-vi.mock('../../../src/daemon/ipc-server.js', () => {
+vi.mock('../../../src/daemon/ipc-client.js', () => { // GAP-0092: branch moved IPCClient ipc-server.js -> ipc-client.js; mock the module bus.ts actually imports
   // Must use a real class so `new IPCClient(...)` works.
   class MockIPCClient {
     send = mockIpcSend;
@@ -440,6 +440,7 @@ describe('bus update-cron', () => {
 
 describe('bus test-cron-fire', () => {
   it('success: sends fire-cron IPC and prints confirmation', async () => {
+    mockIpcIsDaemonRunning.mockReset(); mockIpcIsDaemonRunning.mockResolvedValue(true); // GAP-0092: branch added a daemon-running guard; reset clears any leaked sibling mockResolvedValueOnce(false)
     seedCrons([makeCron('heartbeat')]);
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});

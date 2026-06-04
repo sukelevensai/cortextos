@@ -4,6 +4,7 @@
  * and last-sent cache (lines 111-113).
  */
 
+import { createHash } from 'crypto';
 import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { logEvent } from '../bus/event.js';
@@ -20,6 +21,10 @@ import type { BusPaths, TelegramMessage } from '../types/index.js';
  */
 export interface OutboundLogMetadata {
   parseMode?: 'html' | 'none';
+}
+
+function textSha256(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
 /**
@@ -47,11 +52,42 @@ export function logOutboundMessage(
     agent: agentName,
     chat_id: String(chatId),
     text,
+    text_chars: text.length,
+    text_sha256: textSha256(text),
     message_id: messageId,
     ...meta,
   });
 
   appendFileSync(join(logDir, 'outbound-messages.jsonl'), entry + '\n', 'utf-8');
+}
+
+export function verifyLatestOutboundMessage(
+  ctxRoot: string,
+  agentName: string,
+  chatId: string | number,
+  text: string,
+  messageId: number,
+): { ok: true } | { ok: false; reason: string } {
+  const logPath = join(ctxRoot, 'logs', agentName, 'outbound-messages.jsonl');
+  if (!existsSync(logPath)) return { ok: false, reason: 'outbound log missing' };
+
+  const lines = readFileSync(logPath, 'utf-8').trim().split('\n').filter(Boolean);
+  if (lines.length === 0) return { ok: false, reason: 'outbound log empty' };
+
+  let entry: Record<string, unknown>;
+  try {
+    entry = JSON.parse(lines[lines.length - 1]);
+  } catch {
+    return { ok: false, reason: 'latest outbound log entry is invalid JSON' };
+  }
+
+  if (String(entry.chat_id) !== String(chatId)) return { ok: false, reason: 'chat_id mismatch' };
+  if (Number(entry.message_id) !== Number(messageId)) return { ok: false, reason: 'message_id mismatch' };
+  if (entry.text !== text) return { ok: false, reason: 'text mismatch' };
+  if (Number(entry.text_chars) !== text.length) return { ok: false, reason: 'text length mismatch' };
+  if (entry.text_sha256 !== textSha256(text)) return { ok: false, reason: 'text hash mismatch' };
+
+  return { ok: true };
 }
 
 /**

@@ -97,7 +97,10 @@ function fetchChatId(botToken: string): string {
     timeout: 10000,
   });
   const id = result.stdout?.trim() ?? '';
-  if (id && /^\d+$/.test(id)) {
+  // GAP-0010: allow an optional leading '-' so group/supergroup chat IDs
+  // (negative, e.g. -100xxxxxxxxxx) auto-detect instead of silently falling
+  // through to manual entry.
+  if (id && /^-?\d+$/.test(id)) {
     console.log(`  Chat ID: ${id}`);
     return id;
   }

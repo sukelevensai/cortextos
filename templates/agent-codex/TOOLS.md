@@ -9,14 +9,25 @@ All cortextOS commands: `cortextos bus <command>`. Full docs in skill files — 
 When a `=== TELEGRAM from <name> (chat_id:<id>) ===` block appears in your session, the inject ends with:
 
 ```
-Reply using: cortextos bus send-telegram <chat_id> '<your reply>'
+Reply using: cortextos bus send-telegram <chat_id> '<one-line reply only>'
 ```
 
 **Run that exact command.** This is the only way a codex agent reaches the user. There is no IDE chat panel, no API — every Telegram reply goes through `cortextos bus send-telegram`. Do this BEFORE any other action.
 
+**Multiline safety:** direct message argument is safe only for one-line replies. For multiline, bullets, or long replies, write full text to a temp UTF-8 file and send with `--message-file`. Never pass multiline text as a direct shell argument.
+
 ```bash
 # Reply to user
 cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID 'message text'
+
+# Multiline reply
+tmp=$(mktemp)
+cat > "$tmp" <<'EOF'
+full reply text
+with every line preserved
+EOF
+cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID --message-file "$tmp"
+rm -f "$tmp"
 
 # Reply with a photo
 cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID 'caption' --image /path/to/file.png
@@ -187,4 +198,4 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 
 ## Reminder
 
-Every Telegram message ends with a `Reply using: cortextos bus send-telegram <chat_id> '<reply>'` line. **Run that command.** Do not type the reply into stdout, do not write a memo, do not log an event in place of replying — call the bus. The user reads what comes out of `cortextos bus send-telegram`. Nothing else reaches them.
+Every Telegram message ends with a `Reply using: cortextos bus send-telegram <chat_id> '<one-line reply only>'` line. Use direct argument only for one-line replies. For multiline, bullets, or long replies, write the reply to a temp UTF-8 file and run `cortextos bus send-telegram <chat_id> --message-file <file>`. Do not type the reply into stdout, do not write a memo, do not log an event in place of replying — call the bus. The user reads what comes out of `cortextos bus send-telegram`. Nothing else reaches them.

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { join, sep } from 'path';
 import { homedir } from 'os';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
@@ -108,6 +108,24 @@ export class AgentProcess {
 
     // Determine start mode
     const mode = this.shouldContinue() ? 'continue' : 'fresh';
+    // Phantom context-warning guard: a 'fresh' session is assigned a NEW
+    // session_id, so any existing context_status.json belongs to the prior
+    // (now-dead) session. The daemon's context monitor (fast-checker) keys its
+    // staleness guard on written_at (time) and its new-session reset on a
+    // session_id CHANGE -- neither catches a recent file that still carries the
+    // OLD session_id, so the dead session's high reading would fire a phantom
+    // warning into the fresh low-context session before its first real reading
+    // is written. Delete it here so the next poll sees no stale value. On
+    // 'continue' the same session resumes and its reading is still valid -- keep it.
+    if (mode === 'fresh') {
+      const ctxStatusPath = join(this.env.ctxRoot, 'state', this.name, 'context_status.json');
+      try {
+        if (existsSync(ctxStatusPath)) {
+          unlinkSync(ctxStatusPath);
+          this.log('Cleared stale context_status.json for fresh session (phantom-warning guard)');
+        }
+      } catch { /* non-fatal */ }
+    }
     const prompt = mode === 'fresh'
       ? this.buildStartupPrompt()
       : this.buildContinuePrompt();
@@ -160,7 +178,7 @@ export class AgentProcess {
         return;
       }
       this.log(`Exited with code ${exitCode} signal ${signal}`);
-      this.handleExit(exitCode);
+      this.handleExit(exitCode, signal);
       // Signal anyone awaiting this PTY's exit (e.g. stop() — BUG-011 fix)
       this.resolveExit?.();
       this.resolveExit = null;
@@ -497,7 +515,7 @@ export class AgentProcess {
     }
   }
 
-  private handleExit(exitCode: number): void {
+  private handleExit(exitCode: number, signal?: number): void {
     // Capture last 16KB of the agent's stdout BEFORE nulling pty.
     // Used by the image-poison auto-recovery check below — reads the log
     // file so this works even if the PTY buffer has already been GC'd.
@@ -600,6 +618,7 @@ export class AgentProcess {
           `CRASH_LOOP: ${this.crashTimestamps.length} crashes in ${this.crashWindowMs / 1000}s window — auto-pausing`,
         );
         this.appendCrashToRestartsLog(exitCode, 0, 'CRASH_LOOP');
+        this.writeCrashDetail('CRASH_LOOP', exitCode, signal, recentOutput);
         this.status = 'halted';
         this.notifyStatusChange();
         return;
@@ -615,6 +634,7 @@ export class AgentProcess {
     if (this.crashCount >= this.maxCrashesPerDay) {
       this.log(`HALTED: exceeded ${this.maxCrashesPerDay} crashes today`);
       this.appendCrashToRestartsLog(exitCode, 0, 'HALTED');
+      this.writeCrashDetail('HALTED', exitCode, signal, recentOutput);
       this.status = 'halted';
       this.notifyStatusChange();
       return;
@@ -628,6 +648,7 @@ export class AgentProcess {
     // bus/system.ts wrote here, which left daemon-classified crashes
     // invisible outside the rotating PM2 daemon stdout log.
     this.appendCrashToRestartsLog(exitCode, backoff, 'CRASH');
+    this.writeCrashDetail('CRASH', exitCode, signal, recentOutput);
     this.status = 'crashed';
     this.notifyStatusChange();
 
@@ -707,7 +728,11 @@ export class AgentProcess {
       try {
         const { writeFileSync } = require('fs');
         writeFileSync(onboardedPath, '', 'utf-8');
-      } catch { /* ignore */ }
+      } catch (e) {
+        // GAP-0026: silent fail here makes the agent re-run onboarding on the next
+        // restart (the marker that suppresses re-onboarding never persisted).
+        process.stderr.write(`agent-process: WARNING failed to write .onboarded marker for ${this.name}; agent may re-onboard next restart: ${(e as Error).message}\n`);
+      }
     }
 
     if (!existsSync(onboardedPath) && existsSync(onboardingPath)) {
@@ -725,7 +750,7 @@ export class AgentProcess {
     // before cron restoration, before heartbeat, before anything else. Placing this instruction
     // immediately after the handoffBlock in the prompt ensures it is not buried.
     const handoffUxOverride = isHandoffRestart
-      ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. CRITICAL: After reading the handoff document, your VERY FIRST tool call MUST be a Bash call running: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID \'back — [what you were just working on]\' — replace the brackets with one brief plain-English sentence about your current state. Do this BEFORE running heartbeat, BEFORE any other tool call. No cron IDs, no status report, no cold-boot phrasing. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely).'
+      ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. CRITICAL: After reading the handoff document, your VERY FIRST tool call MUST be a Bash call running: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID \'back — [what you were just working on]\' — replace the brackets with one brief plain-English sentence about your current state. Do this BEFORE running heartbeat, BEFORE any other tool call. No cron IDs, no status report, no cold-boot phrasing. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely). After the back message has been sent successfully, do NOT wait for the user: resume work immediately by executing the ## Next Actions from the handoff doc in order, picking up exactly where you left off. ONLY exceptions: (a) if a Next Action requires user approval under your guardrails, request that approval instead of proceeding; (b) if the Next Actions are missing, empty, already complete, or too vague to execute safely, report status briefly and await direction. Do not sit idle when actionable work remains.'
       : '';
     const onlineMessage = isHandoffRestart
       ? ''
@@ -922,6 +947,44 @@ export class AgentProcess {
     }
   }
 
+  /**
+   * Persist a diagnostic snapshot when the agent process dies unexpectedly.
+   *
+   * The agent runs under a PTY, which merges stdout+stderr into one stream, so
+   * there is no separate stderr to capture. Instead we snapshot the tail of the
+   * (already secret-redacted) PTY output at crash time, ANSI stripped, alongside
+   * the exit code and signal. This turns an opaque exit_code=-1 into something an
+   * operator can actually read. Bounded + rotated so it cannot grow without limit;
+   * all errors swallowed: diagnostics must never break crash recovery.
+   */
+  private writeCrashDetail(
+    kind: 'CRASH' | 'HALTED' | 'CRASH_LOOP',
+    exitCode: number,
+    signal: number | undefined,
+    recentOutput: string,
+  ): void {
+    try {
+      const logDir = join(this.env.ctxRoot, 'logs', this.name);
+      ensureDir(logDir);
+      const detailPath = join(logDir, 'crashes-detail.log');
+      try {
+        if (statSync(detailPath).size >= 5 * 1024 * 1024) {
+          renameSync(detailPath, detailPath + '.1');
+        }
+      } catch { /* file may not exist yet - fine */ }
+      const cleaned = recentOutput
+        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07]*\x07/g, '');
+      const tail = cleaned.slice(-8192);
+      const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const header =
+        `\n===== ${kind} ${timestamp} ` +
+        `exit_code=${exitCode} signal=${signal ?? 'none'} crash_count=${this.crashCount} =====\n`;
+      appendFileSync(detailPath, header + tail + '\n', 'utf-8');
+    } catch {
+      /* swallow - never break crash recovery on a logging failure */
+    }
+  }
   /**
    * Append an unplanned-exit entry to restarts.log. Complements the planned
    * SELF-RESTART / HARD-RESTART entries written by src/bus/system.ts so that

@@ -123,7 +123,7 @@ export class FastChecker {
       const ts = new Date().toISOString();
       const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || process.cwd();
       const cliPath = join(frameworkRoot, 'dist', 'cli.js');
-      if (existsSync(cliPath)) {
+      if (cliPath) { // GAP-0092: cliPath always set; attempt unconditionally so the watchdog is not a silent no-op when dist is unbuilt (CI/unit env)
         execFile(
           process.execPath,
           [cliPath, 'bus', 'update-heartbeat', `[watchdog] ${agentName} alive - idle session ${ts}`],
@@ -329,7 +329,8 @@ Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.
     return `=== TELEGRAM from [USER: ${userTag}] (chat_id:${chatId}) ===
 ${replyCx}${historyCx}${body}
 ${linksBlock || ''}
-${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -430,7 +431,8 @@ ${N(caption)}
 \`\`\`
 ${linksBlock || ''}
 local_file: ${imagePath}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -457,7 +459,8 @@ ${N(caption)}
 ${linksBlock || ''}
 local_file: ${filePath}
 file_name: ${N(fileName)}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -487,7 +490,8 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     return `=== TELEGRAM VOICE from ${N(from)} (chat_id:${chatId}) ===
 duration: ${dur}s
 local_file: ${filePath}
-${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -517,7 +521,8 @@ ${linksBlock || ''}
 duration: ${dur}s
 local_file: ${filePath}
 file_name: ${N(fileName)}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -704,6 +709,30 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         }
       }
       this.log(`Permission callback: ${decision} for ${hexId}`);
+      return;
+    }
+
+    // Plan-review callbacks: plan_(allow|deny)_{hexId}. These use the same
+    // response-file mechanism as permission prompts, but a distinct prefix
+    // keeps plan approvals auditable instead of blending into generic prompts.
+    const planMatch = data.match(/^plan_(allow|deny)_([a-f0-9]+)$/);
+    if (planMatch) {
+      const [, decision, hexId] = planMatch;
+      const responseFile = join(this.paths.stateDir, `hook-response-${hexId}.json`);
+      writeFileSync(
+        responseFile,
+        JSON.stringify({ decision, response_kind: 'plan_review' }) + '\n',
+        'utf-8',
+      );
+
+      if (this.telegramApi) {
+        try { await this.telegramApi.answerCallbackQuery(callbackQueryId, 'Got it'); } catch { /* ignore */ }
+        if (chatId && messageId) {
+          const label = decision === 'allow' ? 'Plan Approved' : 'Plan Denied';
+          try { await this.telegramApi.editMessageText(chatId, messageId, label); } catch { /* ignore */ }
+        }
+      }
+      this.log(`Plan callback: ${decision} for ${hexId}`);
       return;
     }
 
@@ -1120,7 +1149,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         writeFileSync(statusPath, JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }));
       } catch { /* non-fatal */ }
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z';
-      const handoffPrompt = `[CONTEXT HANDOFF REQUIRED] Context is at ${Math.round(effectivePct)}%. Write a handoff document to memory/handoffs/handoff-${ts}.md with these sections: ## Current Tasks, ## Next Actions, ## Active Crons, ## Key Context, ## Files Modified This Session. Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(effectivePct)}%" --handoff-doc <absolute path to the handoff doc you just wrote>. Do this NOW before the context window is exhausted.`;
+      const handoffPrompt = `[CONTEXT HANDOFF REQUIRED] Context is at ${Math.round(effectivePct)}%. Write a handoff document to memory/handoffs/handoff-${ts}.md with these sections: ## Current Tasks, ## Next Actions, ## Active Crons, ## Key Context, ## Files Modified This Session, ## Recommended Skills (the 1-3 skills the next session should load first, each with a one-line reason). Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(effectivePct)}%" --handoff-doc <absolute path to the handoff doc you just wrote>. Do this NOW before the context window is exhausted.`;
       this.agent.injectMessage(handoffPrompt);
       this.log(`Handoff prompt injected at ${Math.round(effectivePct)}%`);
       // Pre-arm .force-fresh so the next restart is always a clean fresh session.

@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { spawnSync, execFileSync } from 'child_process';
+import { createHash } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
@@ -21,9 +22,9 @@ import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/kn
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
-import { IPCClient } from '../daemon/ipc-server.js';
+import { IPCClient } from '../daemon/ipc-client.js';
 import { TelegramAPI } from '../telegram/api.js';
-import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
+import { logOutboundMessage, cacheLastSent, verifyLatestOutboundMessage } from '../telegram/logging.js';
 import { evaluateTelegramEgress } from '../bus/egress-guard.js';
 
 /**
@@ -116,6 +117,10 @@ function checkDeliverableRequirement(taskId: string, frameworkRoot: string, org:
 
 export const busCommand = new Command('bus')
   .description('Bus commands for agent messaging, tasks, and events');
+
+function sha256Text(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
 
 busCommand
   .command('send-message')
@@ -399,14 +404,16 @@ busCommand
   .command('list-tasks')
   .option('--agent <name>', 'Filter by agent')
   .option('--status <s>', 'Filter by status')
+  .option('--project <name>', 'Filter by project')
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .option('--respect-deps', 'Sort DAG-aware: unblocked tasks first, blocked tasks last')
-  .action((opts: { agent?: string; status?: string; format?: string; respectDeps?: boolean }) => {
+  .action((opts: { agent?: string; status?: string; project?: string; format?: string; respectDeps?: boolean }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const tasks = listTasks(paths, {
       agent: opts.agent,
       status: opts.status as TaskStatus,
+      project: opts.project,
       respectDeps: opts.respectDeps ?? false,
     });
 
@@ -448,7 +455,8 @@ busCommand
   .argument('<severity>', 'Severity (info, warning, error, critical)')
   .option('--meta <json>', 'Metadata JSON string', '{}')
   .action((category: string, event: string, severity: string, opts: { meta: string }) => {
-    const validCategories: EventCategory[] = ['action', 'error', 'metric', 'milestone', 'heartbeat', 'message', 'task', 'approval'];
+    // GAP-0053: keep IN SYNC with EventCategory / validate.ts VALID_CATEGORIES.
+    const validCategories: EventCategory[] = ['action', 'error', 'metric', 'milestone', 'heartbeat', 'message', 'task', 'approval', 'agent_activity', 'pipeline'];
     if (!validCategories.includes(category as EventCategory)) {
       console.error(`Invalid category '${category}'. Must be one of: ${validCategories.join(', ')}`);
       process.exit(1);
@@ -1000,11 +1008,20 @@ busCommand
   .command('send-telegram')
   .description('Send a message to a Telegram chat')
   .argument('<chat-id>', 'Telegram chat ID')
-  .argument('<message>', 'Message text (supports Telegram Markdown unless --plain-text is set)')
+  .argument('[message]', 'Message text (supports Telegram Markdown unless --plain-text is set)')
+  .option('--message-file <path>', 'Read message text from a UTF-8 file. Safer for multiline PowerShell/.cmd sends.')
   .option('--image <path>', 'Send a photo with caption')
   .option('--file <path>', 'Send a document/file with caption (any file type)')
   .option('--plain-text', 'Skip Telegram Markdown parsing entirely. Use this when the message contains unescaped _, *, backtick, or [ that would otherwise trip the Markdown parser. Without this flag, sendMessage still retries once with parse_mode disabled on a parse-entity error — so it is purely an opt-in to save the retry roundtrip.', false)
-  .action(async (chatId: string, message: string, opts: { image?: string; file?: string; plainText?: boolean }) => {
+  .action(async (chatId: string, message: string | undefined, opts: { messageFile?: string; image?: string; file?: string; plainText?: boolean }) => {
+    if (opts.messageFile) {
+      message = readFileSync(opts.messageFile, 'utf-8');
+      message = message.replace(/^\uFEFF/, '');
+    }
+    if (message === undefined) {
+      console.error('Error: message text required. Pass a message argument or --message-file <path>.');
+      process.exit(1);
+    }
     // Codex agents emit literal '\n'/'\t' inside single-quoted bash where bash
     // does not expand escapes, so they arrive at argv as 2-char literals and
     // Telegram renders them as visible text. Normalize before send + log.
@@ -1060,17 +1077,28 @@ busCommand
         logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId, {
           parseMode: opts.plainText ? 'none' : 'html',
         });
+        const verification = verifyLatestOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId);
+        if (!verification.ok) {
+          throw new Error(`Outbound Telegram log verification failed: ${verification.reason}`);
+        }
         cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
         // Auto-emit activity event so dashboard sees every Telegram send,
         // even from agents that never call log-event directly.
         try {
           const paths = resolvePaths(env.agentName, env.instanceId, env.org);
           const preview = message.length > 120 ? message.slice(0, 120) + '…' : message;
-          logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }));
+          logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({
+            chat_id: chatId,
+            message_id: sentMessageId,
+            text: message,
+            text_chars: message.length,
+            text_sha256: sha256Text(message),
+            preview,
+          }));
         } catch { /* non-fatal */ }
       }
 
-      console.log('Message sent');
+      console.log(`Message sent chars=${message.length} sha256=${sha256Text(message)}`);
     } catch (err: any) {
       console.error(`Failed to send: ${err.message || err}`);
       process.exit(1);

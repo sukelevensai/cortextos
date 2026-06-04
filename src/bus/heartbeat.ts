@@ -109,7 +109,11 @@ export function detectDayNightMode(timezone: string): 'day' | 'night' {
     const formatted = now.toLocaleString('en-US', { timeZone: timezone, hour12: false, hour: '2-digit' });
     const hour = parseInt(formatted, 10);
     return (hour >= 8 && hour < 22) ? 'day' : 'night';
-  } catch {
+  } catch (e) {
+    // GAP-0052: a typo'd CTX_TIMEZONE makes toLocaleString throw a RangeError; the
+    // old silent UTC fallback meant the agent ran the WRONG day/night mode (which
+    // gates autonomy) with nobody aware. Surface it.
+    process.stderr.write(`heartbeat: WARNING invalid timezone '${timezone}' (${(e as Error).message}); falling back to UTC day/night boundaries\n`);
     // Fallback to UTC
     const hour = new Date().getUTCHours();
     return (hour >= 8 && hour < 22) ? 'day' : 'night';
@@ -138,8 +142,13 @@ export function readAllHeartbeats(paths: BusPaths): Heartbeat[] {
     try {
       const content = readFileSync(hbPath, 'utf-8');
       heartbeats.push(JSON.parse(content));
-    } catch {
-      // Skip agents without heartbeat
+    } catch (e) {
+      // GAP-0052: ENOENT (agent never wrote a heartbeat) is an intended skip, but a
+      // corrupt/truncated heartbeat.json silently dropped the agent from the fleet
+      // view - indistinguishable from "no heartbeat". Surface only the corrupt case.
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+        process.stderr.write(`heartbeat: WARNING could not read ${agent} heartbeat at ${hbPath} (corrupt?); dropped from fleet view: ${(e as Error).message}\n`);
+      }
     }
   }
 

@@ -35,6 +35,7 @@ afterEach(() => {
 /** Mirror of CodexAppServerPTY.writeContextStatus output (frozen by PR 06 contract). */
 function writeCodexContextStatus(opts: {
   totalTokens: number;
+  activeContextTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
@@ -42,17 +43,21 @@ function writeCodexContextStatus(opts: {
   threadId: string;
 }): void {
   const cap = opts.modelContextWindow ?? 256000;
-  const usedPct = cap > 0 ? Math.min(100, (opts.totalTokens / cap) * 100) : null;
+  const activeContextTokens = opts.activeContextTokens ?? opts.totalTokens;
+  const usedPct = cap > 0 ? Math.min(100, (activeContextTokens / cap) * 100) : null;
   const payload = {
     used_percentage: usedPct,
     context_window_size: cap,
-    exceeds_200k_tokens: opts.totalTokens > 200000,
+    exceeds_200k_tokens: activeContextTokens > 200000,
     current_usage: {
       input_tokens: opts.inputTokens ?? 0,
       output_tokens: opts.outputTokens ?? 0,
       cache_read_input_tokens: opts.cachedInputTokens ?? 0,
       cache_creation_input_tokens: 0,
     },
+    active_context_tokens: activeContextTokens,
+    raw_total_tokens: opts.totalTokens,
+    raw_current_total_tokens: activeContextTokens,
     session_id: opts.threadId,
     written_at: new Date().toISOString(),
   };
@@ -108,17 +113,18 @@ describe('codex handoff lifecycle — schema parity with claude', () => {
     expect(view!.written_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it('exceeds_200k_tokens flips when codex turn pushes total over 200k', () => {
-    writeCodexContextStatus({ totalTokens: 199_999, threadId: 'mock-thread-1' });
+  it('exceeds_200k_tokens flips when codex current context pushes over 200k', () => {
+    writeCodexContextStatus({ totalTokens: 500_000, activeContextTokens: 199_999, threadId: 'mock-thread-1' });
     expect(readContextStatusAsFastChecker()!.exceeds_200k_tokens).toBe(false);
 
-    writeCodexContextStatus({ totalTokens: 200_001, threadId: 'mock-thread-1' });
+    writeCodexContextStatus({ totalTokens: 500_000, activeContextTokens: 200_001, threadId: 'mock-thread-1' });
     expect(readContextStatusAsFastChecker()!.exceeds_200k_tokens).toBe(true);
   });
 
-  it('used_percentage clamps to 100 when total exceeds modelContextWindow', () => {
+  it('used_percentage clamps to 100 when current context exceeds modelContextWindow', () => {
     writeCodexContextStatus({
       totalTokens: 500_000,
+      activeContextTokens: 500_000,
       modelContextWindow: 256_000,
       threadId: 'mock-thread-overflow',
     });

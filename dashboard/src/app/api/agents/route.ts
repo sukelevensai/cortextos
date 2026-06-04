@@ -14,6 +14,15 @@ export const dynamic = 'force-dynamic';
 const VALID_NAME = /^[a-z0-9_-]+$/;
 const VALID_TEMPLATES = ['agent', 'agent-codex', 'orchestrator', 'analyst'];
 
+// Security (GAP-0009): botToken/chatId/allowedUser are written verbatim into the
+// agent's .env file. Anchored regexes both enforce the expected format AND block
+// newline/CRLF injection -- in JS, `$` without the `m` flag matches only at end of
+// input, so a value like "token\nEXTRA_KEY=evil" is rejected, preventing an
+// attacker from smuggling additional .env lines.
+const VALID_BOT_TOKEN = /^\d+:[A-Za-z0-9_-]+$/;   // Telegram bot token: <botId>:<authToken>
+const VALID_CHAT_ID = /^-?\d+$/;                   // numeric; groups/channels are negative
+const VALID_ALLOWED_USER = /^\d+$/;                // Telegram user id: positive integer
+
 
 // ---------------------------------------------------------------------------
 // GET /api/agents - List all agents
@@ -95,8 +104,28 @@ export async function POST(request: NextRequest) {
   if (!botToken || typeof botToken !== 'string') {
     return Response.json({ error: 'botToken is required' }, { status: 400 });
   }
+  if (!VALID_BOT_TOKEN.test(botToken)) {
+    return Response.json(
+      { error: 'botToken must match Telegram format <botId>:<authToken>' },
+      { status: 400 },
+    );
+  }
   if (!chatId || typeof chatId !== 'string') {
     return Response.json({ error: 'chatId is required' }, { status: 400 });
+  }
+  if (!VALID_CHAT_ID.test(chatId)) {
+    return Response.json(
+      { error: 'chatId must be a numeric Telegram chat id' },
+      { status: 400 },
+    );
+  }
+  if (allowedUser !== undefined) {
+    if (typeof allowedUser !== 'string' || !VALID_ALLOWED_USER.test(allowedUser)) {
+      return Response.json(
+        { error: 'allowedUser must be a numeric Telegram user id' },
+        { status: 400 },
+      );
+    }
   }
 
   const frameworkRoot = getFrameworkRoot();
@@ -126,6 +155,9 @@ export async function POST(request: NextRequest) {
     await copyDir(templateDir, agentDir);
 
     // 2. Write .env file
+    // NOTE: values below are pre-validated newline-free by VALID_BOT_TOKEN /
+    // VALID_CHAT_ID / VALID_ALLOWED_USER above. Any NEW field added here must be
+    // validated the same way before being written, or it can inject extra .env lines.
     const envLines = [
       `BOT_TOKEN=${botToken}`,
       `CHAT_ID=${chatId}`,

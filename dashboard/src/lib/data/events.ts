@@ -2,6 +2,7 @@
 // Reads from SQLite (synced from JSONL event files on disk).
 
 import { db } from '@/lib/db';
+import { queryAll } from './db-query';
 import type { Event } from '@/lib/types';
 
 /**
@@ -32,21 +33,15 @@ export function getRecentEvents(
   const where =
     conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  try {
-    const rows = db
-      .prepare(
-        `SELECT id, timestamp, agent, org, type, category, severity, data, message, source_file
+  return queryAll(
+    `SELECT id, timestamp, agent, org, type, category, severity, data, message, source_file
          FROM events ${where}
          ORDER BY timestamp DESC
-         LIMIT ?`
-      )
-      .all(...params, limit) as Record<string, unknown>[];
-
-    return rows.map(rowToEvent);
-  } catch (err) {
-    console.error('[data/events] getRecentEvents error:', err);
-    return [];
-  }
+         LIMIT ?`,
+    [...params, limit],
+    rowToEvent,
+    'events',
+  );
 }
 
 /**
@@ -71,20 +66,14 @@ export function getEventsToday(org?: string, agent?: string): Event[] {
 
   const where = `WHERE ${conditions.join(' AND ')}`;
 
-  try {
-    const rows = db
-      .prepare(
-        `SELECT id, timestamp, agent, org, type, category, severity, data, message, source_file
+  return queryAll(
+    `SELECT id, timestamp, agent, org, type, category, severity, data, message, source_file
          FROM events ${where}
-         ORDER BY timestamp DESC`
-      )
-      .all(...params) as Record<string, unknown>[];
-
-    return rows.map(rowToEvent);
-  } catch (err) {
-    console.error('[data/events] getEventsToday error:', err);
-    return [];
-  }
+         ORDER BY timestamp DESC`,
+    [...params],
+    rowToEvent,
+    'events',
+  );
 }
 
 /**

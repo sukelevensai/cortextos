@@ -213,6 +213,7 @@ export class CodexAppServerPTY {
       if (content) {
         this.handleInput(content).catch((err) => {
           this._outputBuffer.push(`[codex-app-server] input failed: ${err}\n`);
+          this.emitTurnFailureEvent('codex_app_server_turn_failure', 'input', String(err));
         });
       }
     } else {
@@ -313,7 +314,7 @@ export class CodexAppServerPTY {
 
     const replyToContext = this.extractReplyToContext(beforeReply);
     const replyDirective = chatId
-      ? `Reply via: cortextos bus send-telegram ${chatId} '<your reply>' — this is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
+      ? `Reply via: cortextos bus send-telegram ${chatId} '<one-line reply only>' for short replies. For multiline, bullets, or long replies, write full reply to a temp UTF-8 file and run: cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as a direct shell argument. This is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
       : null;
     const wrap = (payload: string | null): { payload: string; replyDirective: string | null } | null => {
       if (!payload) return null;
@@ -653,6 +654,7 @@ export class CodexAppServerPTY {
     if (!this._executing) {
       this.drainQueue().catch((err) => {
         this._outputBuffer.push(`[codex-app-server] turn queue failed: ${err}\n`);
+        this.emitTurnFailureEvent('codex_app_server_turn_failure', 'turn_queue', String(err));
       });
     }
   }
@@ -807,6 +809,7 @@ export class CodexAppServerPTY {
         break;
       case 'error':
         this._outputBuffer.push(`[codex-app-server] error: ${JSON.stringify(params)}\n`);
+        this.emitTurnFailureEvent('codex_app_server_error', 'error_notification', JSON.stringify(params));
         this.rejectTurnCompletion(new Error(JSON.stringify(params)));
         break;
       case 'thread/tokenUsage/updated':
@@ -881,6 +884,36 @@ export class CodexAppServerPTY {
     }
   }
 
+  /**
+   * Surface a turn/input failure as an `error`-category event so it reaches the
+   * dashboard activity feed and operator alerts. Without this, the matching
+   * `_outputBuffer.push` only reaches PM2 stdout, so a turn that times out or
+   * errors after the inbound message was already ACKed is invisible (GAP-0065).
+   * Mirrors `emitUnsupportedRequestEvent`: never throws (it runs inside `.catch`
+   * handlers); the `_outputBuffer` message is the user-visible fallback.
+   */
+  private emitTurnFailureEvent(eventType: string, stage: string, detail: string): void {
+    try {
+      const paths = resolvePaths(this._env.agentName, this._env.instanceId, this._env.org);
+      logEvent(
+        paths,
+        this._env.agentName,
+        this._env.org,
+        'error',
+        eventType,
+        'error',
+        {
+          runtime: 'codex-app-server',
+          stage,
+          detail,
+          thread_id: this._threadId,
+        },
+      );
+    } catch {
+      // OutputBuffer message above is the user-visible fallback.
+    }
+  }
+
   private setThreadId(threadId: string): void {
     this._threadId = threadId;
     const state: ThreadState = {
@@ -937,20 +970,28 @@ export class CodexAppServerPTY {
    *   - used_percentage = active context tokens / cap * 100  (clamped to [0, 100])
    *   - context_window_size = modelContextWindow ?? config.codex_context_cap ?? 256000
    *   - exceeds_200k_tokens = active context tokens > 200000
-   *   - current_usage.{input,output,cache_read} from total.{input,output,cachedInput}Tokens
+   *   - current_usage.{input,output,cache_read} from last.{input,output,cachedInput}Tokens
    *   - session_id = current threadId
+   *
+   * `tokenUsage.total` is cumulative for the whole app-server session. Using it
+   * for live context pressure makes every turn look worse until FastChecker
+   * forces a needless wrap. `tokenUsage.last` is the current request window,
+   * which is the value the context monitor needs.
    */
   private writeContextStatus(params: Record<string, unknown>): void {
     const tokenUsage = isRecord(params.tokenUsage) ? params.tokenUsage : null;
     if (!tokenUsage) return;
+    const last = isRecord(tokenUsage.last) ? tokenUsage.last : null;
     const total = isRecord(tokenUsage.total) ? tokenUsage.total : null;
-    if (!total) return;
-    const totalTokens = typeof total.totalTokens === 'number' ? total.totalTokens : null;
-    if (totalTokens === null) return;
+    const current = last ?? total;
+    if (!current) return;
+    const currentTotalTokens = typeof current.totalTokens === 'number' ? current.totalTokens : null;
+    if (currentTotalTokens === null) return;
+    const cumulativeTotalTokens = typeof total?.totalTokens === 'number' ? total.totalTokens : currentTotalTokens;
 
-    const inputTokens = typeof total.inputTokens === 'number' ? total.inputTokens : 0;
-    const outputTokens = typeof total.outputTokens === 'number' ? total.outputTokens : 0;
-    const cachedInputTokens = typeof total.cachedInputTokens === 'number' ? total.cachedInputTokens : 0;
+    const inputTokens = typeof current.inputTokens === 'number' ? current.inputTokens : 0;
+    const outputTokens = typeof current.outputTokens === 'number' ? current.outputTokens : 0;
+    const cachedInputTokens = typeof current.cachedInputTokens === 'number' ? current.cachedInputTokens : 0;
     const activeInputTokens = Math.max(0, inputTokens - cachedInputTokens);
     const activeContextTokens = activeInputTokens + outputTokens;
 
@@ -972,7 +1013,8 @@ export class CodexAppServerPTY {
       },
       active_context_tokens: activeContextTokens,
       active_input_tokens: activeInputTokens,
-      raw_total_tokens: totalTokens,
+      raw_total_tokens: cumulativeTotalTokens,
+      raw_current_total_tokens: currentTotalTokens,
       session_id: this._threadId,
       written_at: new Date().toISOString(),
     });

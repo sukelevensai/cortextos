@@ -127,7 +127,10 @@ export function appendExecutionLog(
     // Rotation check: only pay the stat cost when the file might be large.
     // This is a fast path for the common case.
     rotateIfNeeded(filePath);
-  } catch {
-    // Never crash the caller — execution logging is observational only.
+  } catch (e) {
+    // GAP-0028: execution logging is observational, so we still must NOT crash the
+    // caller - but a swallowed append silently loses the cron audit trail. Surface
+    // it on stderr (PM2 captures it) without writing to the log (avoids any loop).
+    process.stderr.write(`cron-execution-log: WARNING failed to append cron execution entry for agent ${agentName}: ${(e as Error).message}\n`);
   }
 }

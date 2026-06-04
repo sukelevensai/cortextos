@@ -70,6 +70,7 @@ export function loadEnv(): {
   botToken?: string;
   chatId?: string;
   agentName: string;
+  org?: string;
   stateDir: string;
   ctxRoot: string;
 } {
@@ -85,7 +86,7 @@ export function loadEnv(): {
 
   for (const envPath of envPaths) {
     if (existsSync(envPath)) {
-      const content = readFileSync(envPath, 'utf-8');
+      const content = readFileSync(envPath, 'utf-8').replace(/^\uFEFF/, '');
       for (const line of content.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
@@ -110,6 +111,7 @@ export function loadEnv(): {
     botToken: process.env.BOT_TOKEN,
     chatId: process.env.CHAT_ID,
     agentName,
+    org: process.env.CTX_ORG,
     stateDir,
     ctxRoot,
   };

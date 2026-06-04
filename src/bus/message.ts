@@ -133,7 +133,11 @@ export function checkInbox(paths: BusPaths): InboxMessage[] {
             console.error(`[bus/message] SECURITY: Message ${msg.id} from '${msg.from}' failed HMAC verification — rejecting`);
             const errDir = join(inbox, '.errors');
             ensureDir(errDir);
-            try { renameSync(srcPath, join(errDir, file)); } catch { /* ignore */ }
+            try { renameSync(srcPath, join(errDir, file)); } catch (e) {
+              // GAP-0027: if quarantine fails the HMAC-rejected file stays in inbox
+              // and is re-read + re-rejected on every poll. Surface the stuck file.
+              process.stderr.write(`bus/message: WARNING could not quarantine HMAC-failed message ${file} to .errors/ (will be re-read each poll): ${(e as Error).message}\n`);
+            }
             continue;
           }
         } else if (signingKey && !msg.sig) {
@@ -151,8 +155,10 @@ export function checkInbox(paths: BusPaths): InboxMessage[] {
         ensureDir(errDir);
         try {
           renameSync(srcPath, join(errDir, file));
-        } catch {
-          // Ignore if move fails
+        } catch (e) {
+          // GAP-0027: if the corrupt file can't be quarantined it stays in inbox
+          // and re-fails parsing on every poll. Surface the stuck file.
+          process.stderr.write(`bus/message: WARNING could not quarantine corrupt message ${file} to .errors/ (will re-fail each poll): ${(e as Error).message}\n`);
         }
       }
     }

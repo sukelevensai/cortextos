@@ -92,7 +92,17 @@ export class WsUnixJsonRpcClient {
 
     this.socket = socket;
     socket.on('data', (chunk) => this.parseFrames(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    socket.on('error', (err) => this.rejectAll(err));
+    socket.on('error', (err) => {
+      // GAP-0063: surface the socket error before rejectAll. rejectAll only
+      // walks this.pending, so an async write failure (EPIPE/ECONNRESET) with no
+      // pending request would otherwise vanish with no stderr/log/event anywhere.
+      try {
+        process.stderr.write(`[ws-unix-client] socket error (${this.socketPath}): ${err.message}\n`);
+      } catch {
+        // stderr unwritable - nothing to do, but never skip rejectAll below
+      }
+      this.rejectAll(err);
+    });
     socket.on('close', () => {
       this.rejectAll(new Error('WebSocket Unix socket closed'));
       this.socket = null;

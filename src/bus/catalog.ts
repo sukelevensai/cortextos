@@ -502,7 +502,15 @@ export function submitCommunityItem(
     submitted_at: timestamp,
   });
 
-  writeFileSync(catalogPath, JSON.stringify(catalog, null, 2) + '\n', 'utf-8');
+  // GAP-0080: an unguarded write let the function fall through to status:'submitted'
+  // even when the catalog never persisted, so the item never appeared in
+  // browse-catalog with no trace. Throw loudly and DO NOT clean up staging, so the
+  // submission can be retried rather than silently lost.
+  try {
+    writeFileSync(catalogPath, JSON.stringify(catalog, null, 2) + '\n', 'utf-8');
+  } catch (e) {
+    throw new Error(`Failed to write community catalog at ${catalogPath}; submission NOT recorded (staging preserved at ${stagingDir} for retry): ${(e as Error).message}`);
+  }
 
   // Clean up staging
   rmSync(stagingDir, { recursive: true, force: true });

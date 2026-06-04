@@ -37,6 +37,13 @@ export function logEvent(
   if (typeof metadata === 'string') {
     if (isValidJson(metadata)) {
       meta = JSON.parse(metadata);
+    } else {
+      // GAP-0057: a malformed --meta string must not vanish into a hollow event.
+      // Preserve the raw payload so the event still carries the data for debugging,
+      // and warn on stderr. Non-breaking (vs throwing, which would crash every
+      // caller on a shell-quoting bug). PM2 captures the stderr line.
+      meta = { raw: metadata };
+      process.stderr.write(`logEvent: --meta was not valid JSON; preserved as { raw }: ${metadata}\n`);
     }
   } else if (metadata) {
     meta = metadata;

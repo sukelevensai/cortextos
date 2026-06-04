@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { IPCClient } from '../daemon/ipc-server.js';
+import { IPCClient } from '../daemon/ipc-client.js';
 import { TelegramAPI, formatValidateError } from '../telegram/api.js';
 
 /**

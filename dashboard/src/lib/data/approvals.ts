@@ -2,6 +2,7 @@
 // Reads from SQLite (synced from JSON approval files on disk).
 
 import { db } from '@/lib/db';
+import { queryAll } from './db-query';
 import type { Approval } from '@/lib/types';
 
 /**
@@ -43,21 +44,15 @@ export function getResolvedApprovals(
 
   const where = `WHERE ${conditions.join(' AND ')}`;
 
-  try {
-    const rows = db
-      .prepare(
-        `SELECT id, title, category, description, status, agent, org,
+  return queryAll(
+    `SELECT id, title, category, description, status, agent, org,
                 created_at, resolved_at, resolved_by, resolution_note, source_file
          FROM approvals ${where}
-         ORDER BY resolved_at DESC`
-      )
-      .all(...params) as Record<string, unknown>[];
-
-    return rows.map(rowToApproval);
-  } catch (err) {
-    console.error('[data/approvals] getResolvedApprovals error:', err);
-    return [];
-  }
+         ORDER BY resolved_at DESC`,
+    [...params],
+    rowToApproval,
+    'approvals',
+  );
 }
 
 /**
@@ -121,21 +116,15 @@ function getApprovalsByStatus(status: string, org?: string): Approval[] {
 
   const where = `WHERE ${conditions.join(' AND ')}`;
 
-  try {
-    const rows = db
-      .prepare(
-        `SELECT id, title, category, description, status, agent, org,
+  return queryAll(
+    `SELECT id, title, category, description, status, agent, org,
                 created_at, resolved_at, resolved_by, resolution_note, source_file
          FROM approvals ${where}
-         ORDER BY created_at DESC`
-      )
-      .all(...params) as Record<string, unknown>[];
-
-    return rows.map(rowToApproval);
-  } catch (err) {
-    console.error('[data/approvals] getApprovalsByStatus error:', err);
-    return [];
-  }
+         ORDER BY created_at DESC`,
+    [...params],
+    rowToApproval,
+    'approvals',
+  );
 }
 
 function rowToApproval(row: Record<string, unknown>): Approval {

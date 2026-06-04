@@ -56,6 +56,19 @@ describe('Bus events', () => {
     });
   });
 
+  it('preserves a malformed --meta string as { raw } instead of dropping it (GAP-0057)', () => {
+    const badMeta = '{"task_id":"abc", agent:}'; // invalid JSON (shell-quoting bug class)
+    logEvent(paths, 'spark', 'eros-os', 'action', 'bad_meta_event', 'info', badMeta);
+
+    const today = new Date().toISOString().split('T')[0];
+    const eventFile = join(paths.analyticsDir, 'events', 'spark', `${today}.jsonl`);
+    const entries = readFileSync(eventFile, 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+    const ev = entries.find((e) => e.event === 'bad_meta_event');
+    expect(ev).toBeDefined();
+    // The payload must survive (not vanish into an empty {}).
+    expect(ev.metadata).toEqual({ raw: badMeta });
+  });
+
   describe('heartbeat refresh side-effect', () => {
     it('bumps last_heartbeat on an existing heartbeat.json without overwriting other fields', async () => {
       const oldHeartbeat: Heartbeat = {

@@ -239,13 +239,23 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
   const orgBase = org ? join(ctxRoot, 'orgs', org) : ctxRoot;
   const reportsDir = join(orgBase, 'analytics', 'reports');
   ensureDir(reportsDir);
-  writeFileSync(join(reportsDir, 'latest.json'), JSON.stringify(report, null, 2) + '\n', 'utf-8');
+  // GAP-0079: an unguarded write here meant ENOSPC/EACCES silently froze the
+  // dashboard metrics (latest.json stale/missing) with the cron still 'succeeding'.
+  try {
+    writeFileSync(join(reportsDir, 'latest.json'), JSON.stringify(report, null, 2) + '\n', 'utf-8');
+  } catch (e) {
+    process.stderr.write(`metrics: WARNING failed to write org metrics report ${join(reportsDir, 'latest.json')}; dashboard metrics will be stale: ${(e as Error).message}\n`);
+  }
 
   // Also write system-wide report if org-scoped
   if (org) {
     const systemReports = join(ctxRoot, 'analytics', 'reports');
     ensureDir(systemReports);
-    writeFileSync(join(systemReports, 'latest.json'), JSON.stringify(report, null, 2) + '\n', 'utf-8');
+    try {
+      writeFileSync(join(systemReports, 'latest.json'), JSON.stringify(report, null, 2) + '\n', 'utf-8');
+    } catch (e) {
+      process.stderr.write(`metrics: WARNING failed to write system metrics report ${join(systemReports, 'latest.json')}: ${(e as Error).message}\n`);
+    }
   }
 
   return report;
@@ -296,7 +306,11 @@ export function storeUsageData(ctxRoot: string, data: UsageData): void {
   ensureDir(usageDir);
 
   // Write latest
-  writeFileSync(join(usageDir, 'latest.json'), JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  try {
+    writeFileSync(join(usageDir, 'latest.json'), JSON.stringify(data, null, 2) + '\n', 'utf-8');
+  } catch (e) {
+    process.stderr.write(`metrics: WARNING failed to write usage latest.json ${join(usageDir, 'latest.json')}: ${(e as Error).message}\n`);
+  }
 
   // Append to daily log
   const today = data.timestamp.split('T')[0];
