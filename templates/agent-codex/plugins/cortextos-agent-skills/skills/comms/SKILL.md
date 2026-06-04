@@ -12,7 +12,7 @@ Messages are delivered in real time by the fast-checker daemon running alongside
 ```
 === TELEGRAM from <name> (chat_id:<id>) ===
 <message text>
-Reply using: cortextos bus send-telegram <chat_id> "<your reply>"
+Reply using: cortextos bus send-telegram <chat_id> "<one-line reply only>"
 
 === AGENT MESSAGE from <agent> [msg_id: <id>] ===
 <message text>
@@ -23,6 +23,9 @@ Reply using: cortextos bus send-message <agent> normal '<your reply>' <msg_id>
 
 1. Read every message block in the injected content
 2. For each message, take action or respond using the `Reply using:` command shown in the header
+   - Use the direct message argument only for one-line replies.
+   - For multiline, bullets, or long replies, write the full reply to a temp UTF-8 file and run `cortextos bus send-telegram <chat_id> --message-file <file>`.
+   - Never pass multiline text as a direct shell argument. PowerShell can truncate it before the CLI receives it.
 3. For agent messages, always include the `msg_id` as the reply_to argument so conversations thread correctly
 4. The fast-checker handles temp file cleanup automatically
 

@@ -380,9 +380,11 @@ describe('FastChecker', () => {
       expect(result).toContain('[Your last message: "Last sent text"]');
     });
 
-    it('instruction uses single quotes to prevent shell variable expansion of $-numbers', () => {
+    it('instruction limits direct sends to one-line replies and points multiline to message-file', () => {
       const result = FastChecker.formatTelegramTextMessage('alice', '999', 'Hello', '/opt/cortextos');
-      expect(result).toContain("send-telegram 999 '<your reply>'");
+      expect(result).toContain("send-telegram 999 '<one-line reply only>'");
+      expect(result).toContain('send-telegram 999 --message-file <file>');
+      expect(result).toContain('Never pass multiline text as direct shell argument');
     });
   });
 
@@ -731,7 +733,8 @@ describe('FastChecker', () => {
       expect(result).toContain('caption:');
       expect(result).toContain('Check this out');
       expect(result).toContain('local_file: /tmp/telegram-images/20260403_abc12345678.jpg');
-      expect(result).toContain("cortextos bus send-telegram 123456789 '<your reply>'");
+      expect(result).toContain("cortextos bus send-telegram 123456789 '<one-line reply only>'");
+      expect(result).toContain('cortextos bus send-telegram 123456789 --message-file <file>');
     });
 
     it('formats photo message with empty caption', () => {
@@ -757,7 +760,8 @@ describe('FastChecker', () => {
       expect(result).toContain('Here is the file');
       expect(result).toContain('local_file: /tmp/telegram-images/report.pdf');
       expect(result).toContain('file_name: report.pdf');
-      expect(result).toContain("cortextos bus send-telegram 123456789 '<your reply>'");
+      expect(result).toContain("cortextos bus send-telegram 123456789 '<one-line reply only>'");
+      expect(result).toContain('cortextos bus send-telegram 123456789 --message-file <file>');
     });
   });
 
@@ -773,7 +777,8 @@ describe('FastChecker', () => {
       expect(result).toContain('=== TELEGRAM VOICE from Alice (chat_id:123456789) ===');
       expect(result).toContain('duration: 12s');
       expect(result).toContain('local_file: /tmp/telegram-images/voice_1743718313.ogg');
-      expect(result).toContain("cortextos bus send-telegram 123456789 '<your reply>'");
+      expect(result).toContain("cortextos bus send-telegram 123456789 '<one-line reply only>'");
+      expect(result).toContain('cortextos bus send-telegram 123456789 --message-file <file>');
     });
 
     it('uses "unknown" when duration is undefined', () => {
@@ -874,7 +879,8 @@ describe('FastChecker', () => {
       expect(result).toContain('duration: 45s');
       expect(result).toContain('local_file: /tmp/telegram-images/video_1743718313.mp4');
       expect(result).toContain('file_name: video_1743718313.mp4');
-      expect(result).toContain("cortextos bus send-telegram 123456789 '<your reply>'");
+      expect(result).toContain("cortextos bus send-telegram 123456789 '<one-line reply only>'");
+      expect(result).toContain('cortextos bus send-telegram 123456789 --message-file <file>');
     });
   });
 });

@@ -314,7 +314,7 @@ export class CodexAppServerPTY {
 
     const replyToContext = this.extractReplyToContext(beforeReply);
     const replyDirective = chatId
-      ? `Reply via: cortextos bus send-telegram ${chatId} '<your reply>' — this is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
+      ? `Reply via: cortextos bus send-telegram ${chatId} '<one-line reply only>' for short replies. For multiline, bullets, or long replies, write full reply to a temp UTF-8 file and run: cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as a direct shell argument. This is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
       : null;
     const wrap = (payload: string | null): { payload: string; replyDirective: string | null } | null => {
       if (!payload) return null;

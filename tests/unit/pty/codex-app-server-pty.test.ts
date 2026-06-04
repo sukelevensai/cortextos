@@ -452,7 +452,8 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     expect(call[0]).toBe('turn/start');
     const text = (call[1] as { input: Array<{ text: string }> }).input[0].text;
     expect(text).toContain('Hello? Are you working right?');
-    expect(text).toContain("cortextos bus send-telegram 7940429114 '<your reply>'");
+    expect(text).toContain("cortextos bus send-telegram 7940429114 '<one-line reply only>'");
+    expect(text).toContain('cortextos bus send-telegram 7940429114 --message-file <file>');
     expect(text).toContain('Do not reply through the codex channel.');
   });
 

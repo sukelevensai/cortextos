@@ -329,7 +329,8 @@ Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.
     return `=== TELEGRAM from [USER: ${userTag}] (chat_id:${chatId}) ===
 ${replyCx}${historyCx}${body}
 ${linksBlock || ''}
-${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -430,7 +431,8 @@ ${N(caption)}
 \`\`\`
 ${linksBlock || ''}
 local_file: ${imagePath}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -457,7 +459,8 @@ ${N(caption)}
 ${linksBlock || ''}
 local_file: ${filePath}
 file_name: ${N(fileName)}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -487,7 +490,8 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     return `=== TELEGRAM VOICE from ${N(from)} (chat_id:${chatId}) ===
 duration: ${dur}s
 local_file: ${filePath}
-${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -517,7 +521,8 @@ ${linksBlock || ''}
 duration: ${dur}s
 local_file: ${filePath}
 file_name: ${N(fileName)}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }

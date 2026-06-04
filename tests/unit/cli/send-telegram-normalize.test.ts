@@ -17,7 +17,7 @@
  * fix is runtime-agnostic by construction.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -108,7 +108,8 @@ describe('PR-12: send-telegram normalizes literal \\n / \\t (codex agent fix)', 
 
   it('reads multiline message text from --message-file', async () => {
     const messagePath = join(tempCwd, 'telegram-message.txt');
-    writeFileSync(messagePath, 'line one\n- item two\n- item three', 'utf-8');
+    const messageText = 'line one\n- item two\n- item three';
+    writeFileSync(messagePath, messageText, 'utf-8');
 
     await busCommand.parseAsync(
       ['send-telegram', '12345', '--message-file', messagePath],
@@ -117,7 +118,28 @@ describe('PR-12: send-telegram normalizes literal \\n / \\t (codex agent fix)', 
 
     expect(sendMessageSpy).toHaveBeenCalledTimes(1);
     const sentMessage = sendMessageSpy.mock.calls[0][1] as string;
-    expect(sentMessage).toBe('line one\n- item two\n- item three');
+    expect(sentMessage).toBe(messageText);
+
+    const outboundPath = join(tempCtx, 'logs', 'test-agent', 'outbound-messages.jsonl');
+    const outbound = JSON.parse(readFileSync(outboundPath, 'utf-8').trim().split('\n').at(-1)!);
+    expect(outbound.text).toBe(messageText);
+    expect(outbound.text_chars).toBe(messageText.length);
+    expect(outbound.text_sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('strips a UTF-8 BOM from --message-file content', async () => {
+    const messagePath = join(tempCwd, 'telegram-message-with-bom.txt');
+    writeFileSync(messagePath, '\uFEFFstarts clean after bom\nsecond line', 'utf-8');
+
+    await busCommand.parseAsync(
+      ['send-telegram', '12345', '--message-file', messagePath],
+      { from: 'user' },
+    );
+
+    expect(sendMessageSpy).toHaveBeenCalledTimes(1);
+    const sentMessage = sendMessageSpy.mock.calls[0][1] as string;
+    expect(sentMessage).toBe('starts clean after bom\nsecond line');
+    expect(sentMessage.charCodeAt(0)).not.toBe(0xfeff);
   });
 
   it('converts codex-style literal \\t into real tabs before sending', async () => {

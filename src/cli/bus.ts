@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { spawnSync, execFileSync } from 'child_process';
+import { createHash } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
@@ -116,6 +117,10 @@ function checkDeliverableRequirement(taskId: string, frameworkRoot: string, org:
 
 export const busCommand = new Command('bus')
   .description('Bus commands for agent messaging, tasks, and events');
+
+function sha256Text(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
 
 busCommand
   .command('send-message')
@@ -1011,6 +1016,7 @@ busCommand
   .action(async (chatId: string, message: string | undefined, opts: { messageFile?: string; image?: string; file?: string; plainText?: boolean }) => {
     if (opts.messageFile) {
       message = readFileSync(opts.messageFile, 'utf-8');
+      message = message.replace(/^\uFEFF/, '');
     }
     if (message === undefined) {
       console.error('Error: message text required. Pass a message argument or --message-file <path>.');
@@ -1081,11 +1087,18 @@ busCommand
         try {
           const paths = resolvePaths(env.agentName, env.instanceId, env.org);
           const preview = message.length > 120 ? message.slice(0, 120) + '…' : message;
-          logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }));
+          logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({
+            chat_id: chatId,
+            message_id: sentMessageId,
+            text: message,
+            text_chars: message.length,
+            text_sha256: sha256Text(message),
+            preview,
+          }));
         } catch { /* non-fatal */ }
       }
 
-      console.log('Message sent');
+      console.log(`Message sent chars=${message.length} sha256=${sha256Text(message)}`);
     } catch (err: any) {
       console.error(`Failed to send: ${err.message || err}`);
       process.exit(1);
