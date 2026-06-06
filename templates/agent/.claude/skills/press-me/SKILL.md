@@ -11,18 +11,30 @@ Promise: no ask is too big, but big asks need a good attack plan. Guide the user
 
 ## Core Loop
 
-1. **Plan mode.** State that this is planning, not execution. No files, outreach, deploys, paid services, or irreversible actions until approval gates pass.
+1. **Grill me first.** This is the opening engine (the grill-me method, grafted from mattpocock/grill-me). State that this is planning, not execution -- no files, outreach, deploys, paid services, or irreversible actions until approval gates pass. Then interview the user relentlessly about every aspect of the ask, walking down each branch of the decision tree and resolving dependencies between decisions one by one. Ask ONE question at a time. Give your recommended answer with every question. If a question is answerable from the repo, Notion, Odoo, vault, logs, screenshots, code, or docs, research it instead of asking (research-first still holds). Keep grilling until you reach genuine shared understanding on every branch -- relentless, but one-at-a-time, never a 15-question dump.
 2. **Rough idea.** Capture goal in plain language. If target is already clear, do not re-ask it.
-3. **Research first.** Inspect available artifacts before asking questions. Never ask user for facts the repo, Notion, Odoo, vault, logs, screenshots, code, or docs can reveal.
-4. **Grill map.** Build decision tree: branches, dependencies, unknowns, risks, and what must be resolved first.
-5. **Ask only judgment calls.** Ask 1 to 3 bounded questions per round. Prefer 2 when independent. Use 1 when dependency order matters.
-6. **Simplest effective version.** Reduce scope to smallest version that still creates outcome.
-7. **Prompt compiler.** Convert clarity into executor-ready prompt.
-8. **Prompt check.** Check prompt for missing inputs, vague verbs, wrong workspace, unsafe assumptions, weak output format, missing verification, and forbidden touches.
-9. **Plan-check.** Stress-test plan for missing data, sequencing, permissions, cost, state drift, and future breakage.
-10. **Independent cross-check.** Use another model or reviewer when available. Iterate until no critical gaps remain.
-11. **Meta-review.** Ask what failure class nearly happened, then check sibling systems for same pattern.
-12. **Execute.** Do work only after gates pass. Report changed files/pages, verification, and remaining risks.
+3. **Grill map.** Build the decision tree the grill walks: branches, dependencies, unknowns, risks, and what must be resolved first.
+4. **Simplest effective version.** Reduce scope to smallest version that still creates outcome.
+5. **Prompt compiler.** Convert clarity into executor-ready prompt.
+6. **Prompt check.** Check prompt for missing inputs, vague verbs, wrong workspace, unsafe assumptions, weak output format, missing verification, and forbidden touches.
+7. **Plan-check.** Stress-test plan for missing data, sequencing, permissions, cost, state drift, and future breakage.
+8. **Independent cross-check.** Use another model or reviewer when available. Iterate until no critical gaps remain.
+9. **Meta-review.** Ask what failure class nearly happened, then check sibling systems for same pattern.
+10. **Execute.** Do work only after gates pass. Report changed files/pages, verification, and remaining risks.
+
+## Grill Me (Step 1 -- the opening pass)
+
+The first move is a full grill, run as its own pass before scope-cutting or compiling anything (the grill-me method, grafted from mattpocock/grill-me):
+
+> Interview the user relentlessly about every aspect of this plan until you reach a shared understanding. Walk down each branch of the decision tree, resolving dependencies between decisions one by one. For each question, provide your recommended answer.
+>
+> Ask the questions one at a time.
+>
+> If a question can be answered by exploring the codebase, repo, Notion, Odoo, vault, logs, screenshots, or docs, explore that instead of asking.
+
+Run this relentlessly -- one question at a time, recommended answer on each -- until every branch of the Grill Map is resolved: answered, researched, assumed, deferred, or ruled immaterial. Do not soften it into a quick 2-question pass; the point is exhaustive shared understanding before any work.
+
+**Depth gate (this is the overkill skill -- go super in-depth).** The grill is not done because you ran out of questions. Before you exit, run a completeness sweep: ask yourself what you did NOT ask that could change the approach, scope, cost, sequencing, or risk -- then ask those too. Probe second-order effects, edge cases, failure modes, and the "what would make this wrong" angle on each decision. Keep going through additional rounds until an honest sweep finds nothing material left unresolved. Err on the side of one more question, not one fewer. Only then move to scope reduction and the prompt compiler. The Grill Rules below govern how each question is posed.
 
 ## Grill Rules
 
@@ -33,6 +45,7 @@ Promise: no ask is too big, but big asks need a good attack plan. Guide the user
 - Do not ask for discoverable facts.
 - Do not smuggle preferred solution into question wording.
 - Surface contradictions directly.
+- Challenge new domain terms against existing code identifiers, docs, and skill names before accepting them; if a term collides with or duplicates an existing concept, flag it instead of inventing a parallel vocabulary. (grafted from matpocock/grill-with-docs)
 - Convert soft words like "soon", "better", "cheap", "clean", "safe", or "simple" into dates, metrics, owners, scope limits, or explicit choices.
 - Every material ambiguity must become answered, researched, assumed, deferred, or immaterial.
 
@@ -161,6 +174,22 @@ If info is missing, make safest explicit assumption or ask one focused question.
 After execution, report changed files/pages and verification.
 </execution_rules>
 ```
+
+## PRD Mode (optional, for build-type asks)
+
+When the ask is to BUILD something new (feature, site, automation, client workflow) rather than fix or research, optionally emit a structured PRD alongside (or instead of) the executor prompt. Keep it lean -- a decision record, not a doc-factory deliverable:
+
+```text
+PRD
+- Problem: what is broken or missing, and for whom
+- User stories: as a <role> I want <X> so that <Y>  (numbered, 3 to 7)
+- Implementation decisions: chosen approach + the alternatives ruled out and why
+- Testing decisions: what must be tested + the test SEAMS (identify boundaries BEFORE committing to the design)
+- Out of scope: explicit non-goals
+- Open questions / further notes
+```
+
+Save the PRD to the routed location (local file or the correct Notion page per the routing rules). Do NOT publish to any external tracker. (grafted from matpocock/to-prd)
 
 ## Hard Gates
 
