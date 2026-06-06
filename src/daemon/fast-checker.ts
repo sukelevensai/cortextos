@@ -371,10 +371,11 @@ For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, 
 
     if (links.length === 0) return '';
 
+    // The link text/url are attacker-controlled message slices; a fixed ```json
+    // fence could be closed by a backtick run inside them (Codex pass-1 #2).
+    // wrapFenceSafe sizes the fence above any run in the JSON body instead.
     return `telegram_links_extracted_from_entities:
-\`\`\`json
-${JSON.stringify(links, null, 2)}
-\`\`\`
+${wrapFenceSafe(JSON.stringify(links, null, 2))}
 `;
   }
 
