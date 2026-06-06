@@ -260,7 +260,8 @@ export class FastChecker {
    * Untrusted fields (from, text) are sanitized before framing.
    */
   private formatInboxMessage(msg: InboxMessage): string {
-    const replyNote = msg.reply_to ? ` [reply_to: ${msg.reply_to}]` : '';
+    // reply_to is sender-supplied (send-message arg) — header-quote it too.
+    const replyNote = msg.reply_to ? ` [reply_to: ${sanitizeForPtyInjection(String(msg.reply_to))}]` : '';
     // msg.text/from are externally influenced (a body can carry its own
     // fence/header markers; --body-stdin/--body-file made arbitrary bodies easy
     // to send). The body is wrapped with wrapFenceSafe — a dynamically-sized
@@ -324,7 +325,10 @@ Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.
     // name: in a group, any member can set their name to "Luke", but the id is
     // assigned by Telegram. Lets the agent/operator distinguish real from spoof.
     const safeFrom = sanitizeForPtyInjection(from);
-    const userTag = senderId !== undefined && senderId !== '' ? `${safeFrom} | id:${senderId}` : safeFrom;
+    // senderId should be Telegram's numeric id; reject anything non-numeric so
+    // a string-typed caller can never smuggle frame text into the id tag.
+    const idTag = senderId !== undefined && /^\d+$/.test(String(senderId)) ? String(senderId) : '';
+    const userTag = idTag !== '' ? `${safeFrom} | id:${idTag}` : safeFrom;
     return `=== TELEGRAM from [USER: ${userTag}] (chat_id:${chatId}) ===
 ${replyCx}${historyCx}${body}
 ${linksBlock || ''}
@@ -405,8 +409,9 @@ ${wrapFenceSafe(JSON.stringify(links, null, 2))}
     const removed = newReaction.length === 0 && oldReaction.length > 0;
     const label = removed ? `removed ${render(oldReaction)}` : render(newReaction);
 
-    // Frame-forgery: sanitize attacker-controlled display name before framing.
-    return `=== REACTION from [USER: ${sanitizeForPtyInjection(from)}] (chat_id:${chatId}) on message ${messageId}: ${label} ===
+    // Frame-forgery: sanitize attacker-controlled display name AND the rendered
+    // reaction label (the emoji string is external payload, not an enum).
+    return `=== REACTION from [USER: ${sanitizeForPtyInjection(from)}] (chat_id:${chatId}) on message ${messageId}: ${sanitizeForPtyInjection(label)} ===
 
 `;
   }
