@@ -287,7 +287,24 @@ export class CronScheduler {
       return;
     }
     this.loadCrons(/* isReload */ false);
-    this.tickHandle = setInterval(() => void this.tick(), CronScheduler.TICK_INTERVAL_MS);
+    this.tickHandle = setInterval(() => {
+      // GAP-0066: never void the tick() promise. A rejection escaping the
+      // per-cron guards inside tick() would otherwise be a silent unhandled
+      // rejection (no log, no event), and dashboard cron health (driven by the
+      // execution log) would read healthy forever. Catch and log loudly so
+      // daemon-log watchers can see a stuck scheduler. (Structured dashboard
+      // event wiring tracked as GAP-0066b.)
+      this.tick().catch((err) => {
+        try {
+          this.logger(
+            `[cron-scheduler] WARNING: tick() failed unexpectedly for agent "${this.agentName}": ` +
+            `${err instanceof Error ? err.message : String(err)}. Scheduler continues, but the failing cron may stall until daemon restart (see GAP-0066b).`
+          );
+        } catch {
+          // logger itself failed (e.g. broken stdout); nothing safe left to do
+        }
+      });
+    }, CronScheduler.TICK_INTERVAL_MS);
     this.logger(`[cron-scheduler] started for agent "${this.agentName}" with ${this.scheduled.size} cron(s)`);
   }
 

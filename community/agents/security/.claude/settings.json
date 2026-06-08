@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-planmode-telegram",
+            "command": "CORTEXTOS_ROOT=\"${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}\"; CORTEXTOS_ROOT=\"$(cygpath -u \"$CORTEXTOS_ROOT\" 2>/dev/null || printf '%s' \"$CORTEXTOS_ROOT\")\"; \"$CORTEXTOS_ROOT/bin/cortextos-hook.sh\" bus hook-planmode-telegram",
             "timeout": 1860
           }
         ]
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-permission-telegram",
+            "command": "CORTEXTOS_ROOT=\"${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}\"; CORTEXTOS_ROOT=\"$(cygpath -u \"$CORTEXTOS_ROOT\" 2>/dev/null || printf '%s' \"$CORTEXTOS_ROOT\")\"; \"$CORTEXTOS_ROOT/bin/cortextos-hook.sh\" bus hook-permission-telegram",
             "timeout": 1860
           }
         ]
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-loop-detector",
+            "command": "CORTEXTOS_ROOT=\"${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}\"; CORTEXTOS_ROOT=\"$(cygpath -u \"$CORTEXTOS_ROOT\" 2>/dev/null || printf '%s' \"$CORTEXTOS_ROOT\")\"; \"$CORTEXTOS_ROOT/bin/cortextos-hook.sh\" bus hook-loop-detector",
             "timeout": 5
           }
         ]
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-ask-telegram",
+            "command": "CORTEXTOS_ROOT=\"${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}\"; CORTEXTOS_ROOT=\"$(cygpath -u \"$CORTEXTOS_ROOT\" 2>/dev/null || printf '%s' \"$CORTEXTOS_ROOT\")\"; \"$CORTEXTOS_ROOT/bin/cortextos-hook.sh\" bus hook-ask-telegram",
             "timeout": 10
           }
         ]
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-idle-flag",
+            "command": "CORTEXTOS_ROOT=\"${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}\"; CORTEXTOS_ROOT=\"$(cygpath -u \"$CORTEXTOS_ROOT\" 2>/dev/null || printf '%s' \"$CORTEXTOS_ROOT\")\"; \"$CORTEXTOS_ROOT/bin/cortextos-hook.sh\" bus hook-idle-flag",
             "timeout": 5
           }
         ]
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos crash-alert",
+            "command": "CORTEXTOS_ROOT=\"${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}\"; CORTEXTOS_ROOT=\"$(cygpath -u \"$CORTEXTOS_ROOT\" 2>/dev/null || printf '%s' \"$CORTEXTOS_ROOT\")\"; \"$CORTEXTOS_ROOT/bin/cortextos-hook.sh\" crash-alert",
             "timeout": 10
           }
         ]
@@ -79,7 +79,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cortextos bus hook-compact-telegram",
+            "command": "CORTEXTOS_ROOT=\"${CTX_FRAMEWORK_ROOT:-$HOME/cortextos}\"; CORTEXTOS_ROOT=\"$(cygpath -u \"$CORTEXTOS_ROOT\" 2>/dev/null || printf '%s' \"$CORTEXTOS_ROOT\")\"; \"$CORTEXTOS_ROOT/bin/cortextos-hook.sh\" bus hook-compact-telegram",
             "timeout": 10
           }
         ]

@@ -19,7 +19,7 @@ import {
 
 // Real-world legit destinations from the SiteSmith deployment + the attacker
 // chat that triggered the incident.
-const OPERATOR_DM = '8372578968';
+const OPERATOR_DM = '1000000002';
 const LANTERN_GROUP = '-5160244844';
 const COMEUP_ACTIVITY = '-5197520132';
 const ATTACKER_CHAT = '6699179156';
@@ -43,7 +43,7 @@ describe('checkTelegramEgress (pure decision)', () => {
   });
 
   it('accepts numeric chatId input and normalizes to string', () => {
-    expect(checkTelegramEgress(8372578968, allow).allowed).toBe(true);
+    expect(checkTelegramEgress(1000000002, allow).allowed).toBe(true);
     expect(checkTelegramEgress(6699179156, allow).allowed).toBe(false);
   });
 

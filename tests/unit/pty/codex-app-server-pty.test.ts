@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { platform } from 'os';
 
 const fsMocks = {
   existsSync: vi.fn().mockReturnValue(false),
@@ -76,6 +77,9 @@ const mockEnv = {
   projectRoot: '/tmp/fw',
 };
 
+const isWindows = platform() === 'win32';
+const normalizePath = (path: unknown) => String(path).replace(/\\/g, '/');
+
 beforeEach(() => {
   fsMocks.existsSync.mockReset().mockReturnValue(false);
   fsMocks.readFileSync.mockReset();
@@ -94,6 +98,17 @@ beforeEach(() => {
 describe('CodexAppServerPTY socket path policy', () => {
   it('uses codex.sock in the agent state dir by default', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
+    if (isWindows) {
+      expect((pty as unknown as { _socketPath: string })._socketPath).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+      expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+      expect(normalizePath((pty as unknown as { _socketCwd: string })._socketCwd)).toBe('/tmp/ctx/state/codex-app-agent');
+      expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('codex-app-server-socket.json'),
+        expect.stringContaining('windows codex app-server uses localhost websocket transport'),
+        'utf-8',
+      );
+      return;
+    }
     expect((pty as unknown as { _socketPath: string })._socketPath).toBe('/tmp/ctx/state/codex-app-agent/codex.sock');
     expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toBe('unix://./codex.sock');
   });
@@ -105,6 +120,16 @@ describe('CodexAppServerPTY socket path policy', () => {
     };
     const pty = new CodexAppServerPTY(longEnv, {});
     const socketPath = (pty as unknown as { _socketPath: string })._socketPath;
+    if (isWindows) {
+      expect(socketPath).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+      expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+      expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('codex-app-server-socket.json'),
+        expect.stringContaining('windows codex app-server uses localhost websocket transport'),
+        'utf-8',
+      );
+      return;
+    }
     expect(socketPath).toMatch(/\/cas-[a-f0-9]{8}\.sock$/);
     expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^unix:\/\/\.\/cas-[a-f0-9]{8}\.sock$/);
     expect((pty as unknown as { _socketCwd: string })._socketCwd).toBe('/tmp');
@@ -427,7 +452,8 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     expect(call[0]).toBe('turn/start');
     const text = (call[1] as { input: Array<{ text: string }> }).input[0].text;
     expect(text).toContain('Hello? Are you working right?');
-    expect(text).toContain("cortextos bus send-telegram 7940429114 '<your reply>'");
+    expect(text).toContain("cortextos bus send-telegram 7940429114 '<one-line reply only>'");
+    expect(text).toContain('cortextos bus send-telegram 7940429114 --message-file <file>');
     expect(text).toContain('Do not reply through the codex channel.');
   });
 
@@ -806,6 +832,10 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       expect.stringContaining('"threadId": "fresh-thread"'),
       'utf-8',
     );
+    const threadWrite = fsMocks.writeFileSync.mock.calls.find((call) => String(call[0]).includes('codex-app-server-thread.json'));
+    expect(threadWrite?.[1]).toContain('"agentName": "codex-app-agent"');
+    expect(threadWrite?.[1]).toContain('"org": "acme"');
+    expect(threadWrite?.[1]).toContain('"stateSchemaVersion": 2');
   });
 
   it('resumes the persisted thread in continue mode', async () => {
@@ -813,6 +843,9 @@ describe('CodexAppServerPTY thread lifecycle', () => {
     fsMocks.readFileSync.mockReturnValue(JSON.stringify({
       threadId: 'persisted-thread',
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      agentName: 'codex-app-agent',
+      org: 'acme',
+      stateSchemaVersion: 2,
       updatedAt: '2026-05-07T00:00:00Z',
     }));
     requestMock.mockResolvedValue({ result: { thread: { id: 'persisted-thread' } } });
@@ -832,21 +865,21 @@ describe('CodexAppServerPTY thread lifecycle', () => {
     });
   });
 
-  it('resumes the persisted thread in fresh mode when state exists', async () => {
+  it('stamps legacy persisted thread state with this agent after resume', async () => {
     fsMocks.existsSync.mockReturnValue(true);
     fsMocks.readFileSync.mockReturnValue(JSON.stringify({
-      threadId: 'persisted-fresh-thread',
+      threadId: 'legacy-thread',
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       updatedAt: '2026-05-07T00:00:00Z',
     }));
-    requestMock.mockResolvedValue({ result: { thread: { id: 'persisted-fresh-thread' } } });
+    requestMock.mockResolvedValue({ result: { thread: { id: 'legacy-thread' } } });
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
 
-    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('fresh');
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
 
     expect(requestMock).toHaveBeenCalledWith('thread/resume', {
-      threadId: 'persisted-fresh-thread',
+      threadId: 'legacy-thread',
       cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
@@ -854,10 +887,60 @@ describe('CodexAppServerPTY thread lifecycle', () => {
       excludeTurns: true,
       persistExtendedHistory: true,
     });
-    expect(requestMock).not.toHaveBeenCalledWith(
-      'thread/start',
-      expect.anything(),
-    );
+    const threadWrite = fsMocks.writeFileSync.mock.calls.find((call) => String(call[0]).includes('codex-app-server-thread.json'));
+    expect(threadWrite?.[1]).toContain('"agentName": "codex-app-agent"');
+    expect(pty.getOutputBuffer().getRecent()).toContain('legacy thread state has no owner');
+  });
+
+  it('starts a fresh thread when persisted state belongs to another agent', async () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({
+      threadId: 'sibling-thread',
+      cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      agentName: 'lantern-cfo',
+      org: 'acme',
+      stateSchemaVersion: 2,
+      updatedAt: '2026-05-07T00:00:00Z',
+    }));
+    requestMock.mockImplementation((method: string) => {
+      if (method === 'thread/resume') throw new Error('must not resume sibling-owned thread');
+      if (method === 'thread/start') return Promise.resolve({ result: { thread: { id: 'fresh-after-owner-mismatch' } } });
+      return Promise.resolve({ result: {} });
+    });
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('continue');
+
+    const methods = requestMock.mock.calls.map((c) => c[0]);
+    expect(methods).not.toContain('thread/resume');
+    expect(methods).toContain('thread/start');
+    expect(fsMocks.unlinkSync).toHaveBeenCalledWith(expect.stringContaining('codex-app-server-thread.json'));
+    expect(pty.getOutputBuffer().getRecent()).toContain('ignoring persisted thread owned by agent "lantern-cfo"');
+    expect((pty as unknown as { _threadId: string })._threadId).toBe('fresh-after-owner-mismatch');
+  });
+
+  it('fresh mode clears persisted state and starts a fresh thread', async () => {
+    fsMocks.existsSync.mockReturnValue(true);
+    fsMocks.readFileSync.mockReturnValue(JSON.stringify({
+      threadId: 'persisted-fresh-thread',
+      cwd: '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      agentName: 'codex-app-agent',
+      org: 'acme',
+      stateSchemaVersion: 2,
+      updatedAt: '2026-05-07T00:00:00Z',
+    }));
+    requestMock.mockResolvedValue({ result: { thread: { id: 'fresh-replacement-thread' } } });
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _rpc: { request: typeof requestMock } })._rpc = { request: requestMock };
+
+    await (pty as unknown as { startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> }).startOrResumeThread('fresh');
+
+    const methods = requestMock.mock.calls.map((c) => c[0]);
+    expect(methods).not.toContain('thread/resume');
+    expect(methods).toContain('thread/start');
+    expect(fsMocks.unlinkSync).toHaveBeenCalledWith(expect.stringContaining('codex-app-server-thread.json'));
+    expect((pty as unknown as { _threadId: string })._threadId).toBe('fresh-replacement-thread');
   });
 });
 
@@ -891,6 +974,50 @@ describe('CodexAppServerPTY event handling', () => {
       },
     );
     expect(pty.getOutputBuffer().getRecent()).toContain('unsupported request');
+  });
+
+  it('emits an error event when the app-server sends an error notification (GAP-0065)', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { handleRpcMessage(message: unknown): void }).handleRpcMessage({
+      method: 'error',
+      params: { message: 'turn blew up' },
+    });
+    expect(logEventMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'codex-app-agent',
+      'acme',
+      'error',
+      'codex_app_server_error',
+      'error',
+      {
+        runtime: 'codex-app-server',
+        stage: 'error_notification',
+        detail: JSON.stringify({ message: 'turn blew up' }),
+        thread_id: null,
+      },
+    );
+    expect(pty.getOutputBuffer().getRecent()).toContain('[codex-app-server] error:');
+  });
+
+  it('emits a turn_failure event when a queued turn rejects (GAP-0065)', async () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    // No thread id -> startTurn throws -> drainQueue rejects -> queueTurn .catch fires.
+    (pty as unknown as { _alive: boolean })._alive = true;
+    (pty as unknown as { queueTurn(input: unknown[]): void }).queueTurn([{ type: 'text', text: 'hi' }]);
+    await new Promise((r) => setImmediate(r));
+    expect(logEventMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'codex-app-agent',
+      'acme',
+      'error',
+      'codex_app_server_turn_failure',
+      'error',
+      expect.objectContaining({
+        runtime: 'codex-app-server',
+        stage: 'turn_queue',
+      }),
+    );
+    expect(pty.getOutputBuffer().getRecent()).toContain('turn queue failed');
   });
 
   it('fires Telegram typing from streamed assistant deltas', () => {
@@ -937,26 +1064,45 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
 
     expect(atomicWriteSyncMock).toHaveBeenCalledTimes(1);
     const [path] = atomicWriteSyncMock.mock.calls[0];
-    expect(path).toBe('/tmp/ctx/state/codex-app-agent/context_status.json');
+    expect(normalizePath(path)).toBe('/tmp/ctx/state/codex-app-agent/context_status.json');
     const payload = lastWrittenPayload()!;
-    expect(payload.used_percentage).toBeCloseTo(35, 5);
+    expect(payload.used_percentage).toBeCloseTo(0.5, 5);
     expect(payload.context_window_size).toBe(200000);
     expect(payload.exceeds_200k_tokens).toBe(false);
     expect(payload.session_id).toBe('thread-9');
     expect(typeof payload.written_at).toBe('string');
     expect(payload.current_usage).toEqual({
-      input_tokens: 60000,
-      output_tokens: 4000,
-      cache_read_input_tokens: 5000,
+      input_tokens: 1000,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
     });
+    expect(payload.active_context_tokens).toBe(1000);
+    expect(payload.raw_current_total_tokens).toBe(1000);
+    expect(payload.raw_total_tokens).toBe(70000);
+  });
+
+  it('uses last usage for live pressure while preserving cumulative telemetry', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    (pty as unknown as { _threadId: string })._threadId = 'thread-9';
+    feedTokenUsage(pty, {
+      last: { cachedInputTokens: 8000, inputTokens: 12000, outputTokens: 500, reasoningOutputTokens: 0, totalTokens: 12500 },
+      total: { cachedInputTokens: 1279744, inputTokens: 1441503, outputTokens: 16470, reasoningOutputTokens: 0, totalTokens: 1450000 },
+      modelContextWindow: 258400,
+    });
+
+    const payload = lastWrittenPayload()!;
+    expect(payload.used_percentage).toBeCloseTo((4500 / 258400) * 100, 5);
+    expect(payload.active_context_tokens).toBe(4500);
+    expect(payload.raw_current_total_tokens).toBe(12500);
+    expect(payload.raw_total_tokens).toBe(1450000);
   });
 
   it('falls back to default 256000 cap when modelContextWindow is null', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
-      last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      last: { cachedInputTokens: 0, inputTokens: 64000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 64000 },
       total: { cachedInputTokens: 0, inputTokens: 64000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 64000 },
       modelContextWindow: null,
     });
@@ -970,7 +1116,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
     const pty = new CodexAppServerPTY(mockEnv, { codex_context_cap: 100000 });
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
-      last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      last: { cachedInputTokens: 0, inputTokens: 50000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 50000 },
       total: { cachedInputTokens: 0, inputTokens: 50000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 50000 },
       modelContextWindow: null,
     });
@@ -980,11 +1126,11 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
     expect(payload.used_percentage).toBeCloseTo(50, 5);
   });
 
-  it('flags exceeds_200k_tokens once total > 200k', () => {
+  it('flags exceeds_200k_tokens once current active context > 200k', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
-      last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      last: { cachedInputTokens: 0, inputTokens: 210000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 210000 },
       total: { cachedInputTokens: 0, inputTokens: 210000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 210000 },
       modelContextWindow: 1000000,
     });
@@ -993,11 +1139,11 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
     expect(payload.exceeds_200k_tokens).toBe(true);
   });
 
-  it('clamps used_percentage to 100 when totals exceed cap', () => {
+  it('clamps used_percentage to 100 when current active context exceeds cap', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
-      last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      last: { cachedInputTokens: 0, inputTokens: 300000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 300000 },
       total: { cachedInputTokens: 0, inputTokens: 300000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 300000 },
       modelContextWindow: 256000,
     });
@@ -1016,12 +1162,12 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
     expect(atomicWriteSyncMock).not.toHaveBeenCalled();
   });
 
-  it('skips the write when total.totalTokens is missing', () => {
+  it('skips the write when current totalTokens is missing', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
-      last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
-      total: { cachedInputTokens: 0, inputTokens: 100, outputTokens: 0, reasoningOutputTokens: 0 },
+      last: { cachedInputTokens: 0, inputTokens: 100, outputTokens: 0, reasoningOutputTokens: 0 },
+      total: { cachedInputTokens: 0, inputTokens: 100, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 100 },
       modelContextWindow: 200000,
     });
     expect(atomicWriteSyncMock).not.toHaveBeenCalled();
@@ -1031,7 +1177,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     feedTokenUsage(pty, {
-      last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      last: { cachedInputTokens: 0, inputTokens: 1000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1000 },
       total: { cachedInputTokens: 0, inputTokens: 1000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1000 },
       modelContextWindow: 200000,
     });
@@ -1043,7 +1189,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
     expect(() => feedTokenUsage(pty, {
-      last: { cachedInputTokens: 0, inputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      last: { cachedInputTokens: 0, inputTokens: 1000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1000 },
       total: { cachedInputTokens: 0, inputTokens: 1000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1000 },
       modelContextWindow: 200000,
     })).not.toThrow();
@@ -1080,7 +1226,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → codex-tokens.jsonl', (
 
     expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
     const [path, line] = fsMocks.appendFileSync.mock.calls[0] as [string, string];
-    expect(path).toBe('/tmp/ctx/logs/codex-app-agent/codex-tokens.jsonl');
+    expect(normalizePath(path)).toBe('/tmp/ctx/logs/codex-app-agent/codex-tokens.jsonl');
     expect(line.endsWith('\n')).toBe(true);
 
     const entry = lastAppendedEntry()!;
@@ -1233,5 +1379,32 @@ describe('CodexAppServerPTY startOrResumeThread — GAP-0068 no sibling-adopt', 
     expect(methods).not.toContain('thread/resume'); // nothing to resume
     expect(methods).toContain('thread/start');
     expect((pty as unknown as { _threadId: string })._threadId).toBe('fresh-2');
+  });
+});
+
+describe('CodexAppServerPTY buildMediaPayload — dynamic fence parsing', () => {
+  it('extracts a caption wrapped in a dynamically-sized (4-backtick) fence', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    // wrapFenceSafe grows the fence to 4 backticks when the caption contains ```;
+    // the consumer must match the same fence length, not a hard-coded ```.
+    const beforeReply = [
+      '=== TELEGRAM PHOTO from Alice (chat_id:1) ===',
+      'caption:',
+      '````',
+      'look at this ``` code',
+      '````',
+      'local_file: /tmp/p.jpg',
+    ].join('\n');
+    const payload = (pty as unknown as { buildMediaPayload(t: string, b: string): string | null })
+      .buildMediaPayload('PHOTO', beforeReply);
+    expect(payload).toContain('caption: look at this ``` code');
+  });
+
+  it('still extracts a caption in a plain 3-backtick fence', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {});
+    const beforeReply = '=== TELEGRAM PHOTO from Bob (chat_id:2) ===\ncaption:\n```\nhello\n```\nlocal_file: /tmp/x.jpg';
+    const payload = (pty as unknown as { buildMediaPayload(t: string, b: string): string | null })
+      .buildMediaPayload('PHOTO', beforeReply);
+    expect(payload).toContain('caption: hello');
   });
 });

@@ -80,8 +80,8 @@ describe('notifyAgents', () => {
       recipients: ['chief'],
     });
     const [cmd, args] = execFileMock.mock.calls[0];
-    expect(cmd).toBe('cortextos');
-    expect(args.slice(0, 4)).toEqual(['bus', 'send-message', 'chief', 'high']);
+    expect(cmd).toBe(process.execPath);
+    expect(args.slice(1, 5)).toEqual(['bus', 'send-message', 'chief', 'high']);
   });
 
   it('body includes all required fields', () => {
@@ -94,7 +94,7 @@ describe('notifyAgents', () => {
       restartAttempted: false,
       recipients: ['analyst'],
     });
-    const body: string = execFileMock.mock.calls[0][1][4];
+    const body: string = execFileMock.mock.calls[0][1][5];
     expect(body).toContain('agent=dev');
     expect(body).toContain('type=daemon-crashed');
     expect(body).toContain('reason: PTY null write');
@@ -113,7 +113,7 @@ describe('notifyAgents', () => {
       restartAttempted: true,
       recipients: ['chief'],
     });
-    expect(execFileMock.mock.calls[0][1][4]).toContain('restart attempted: yes');
+    expect(execFileMock.mock.calls[0][1][5]).toContain('restart attempted: yes');
   });
 
   it('uses fallback strings when reason and lastTask are empty', () => {
@@ -126,7 +126,7 @@ describe('notifyAgents', () => {
       restartAttempted: true,
       recipients: ['chief'],
     });
-    const body: string = execFileMock.mock.calls[0][1][4];
+    const body: string = execFileMock.mock.calls[0][1][5];
     expect(body).toContain('reason: none');
     expect(body).toContain('last status: unknown');
   });

@@ -82,10 +82,12 @@ Messages arrive in real time via the fast-checker daemon:
 ```
 === TELEGRAM from <name> (chat_id:<id>) ===
 <text>
-Reply using: cortextos bus send-telegram <chat_id> "<reply>"
+Reply using: cortextos bus send-telegram <chat_id> "<one-line reply only>"
 ```
 
 Photos include a `local_file:` path. Callbacks include `callback_data:` and `message_id:`. Process all immediately and reply using the command shown.
+
+For multiline, bullets, or long replies, write the full reply to a temp UTF-8 file and run `cortextos bus send-telegram <chat_id> --message-file <file>`. Never pass multiline text as a direct shell argument.
 
 **Telegram formatting:** send-telegram.sh uses Telegram's regular Markdown (not MarkdownV2). Do NOT escape characters like `!`, `.`, `(`, `)`, `-` with backslashes. Just write plain natural text. Only `_`, `*`, `` ` ``, and `[` have special meaning.
 

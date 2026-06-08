@@ -7,8 +7,33 @@
 
 set -euo pipefail
 
+read_hook_stdin() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 2 cat || true
+        return
+    fi
+    if command -v gtimeout >/dev/null 2>&1; then
+        gtimeout 2 cat || true
+        return
+    fi
+
+    local tmp pid
+    tmp="$(mktemp)"
+    cat > "$tmp" &
+    pid=$!
+    for _ in {1..20}; do
+        if ! kill -0 "$pid" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+    fi
+    cat "$tmp" 2>/dev/null || true
+    rm -f "$tmp"
+}
+
 # Read stdin FIRST before anything that might consume it
-INPUT=$(cat)
+INPUT="$(read_hook_stdin)"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/_ctx-env.sh" 2>/dev/null || true

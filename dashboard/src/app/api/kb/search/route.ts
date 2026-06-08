@@ -131,7 +131,14 @@ export async function GET(request: NextRequest) {
 
   // Pre-flight: check venv exists
   if (!existsSync(path.join(frameworkRoot, 'knowledge-base', 'venv'))) {
-    return Response.json({ results: [], total: 0, query: q, collection: `shared-${org}` });
+    // GAP-0046: the KB is uninitialized (no venv) - a real service-unavailable
+    // state, NOT a legitimately empty search. Returning 200 + [] made every query
+    // silently look "successful but empty" forever. Signal 503 so the operator can
+    // tell "KB down" from "no matches" (mirrors the GEMINI_API_KEY 503 above).
+    return Response.json(
+      { error: 'kb_not_initialized', hint: 'Knowledge base is not initialized (venv missing). Run cortextos kb-init for this org.' },
+      { status: 503 },
+    );
   }
 
   /**

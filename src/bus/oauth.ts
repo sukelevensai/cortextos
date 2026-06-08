@@ -455,7 +455,10 @@ function writeTokenToAgents(
       agentNames = readdirSync(agentsBase, { withFileTypes: true })
         .filter((d: { isDirectory(): boolean }) => d.isDirectory())
         .map((d: { name: string }) => d.name);
-    } catch {
+    } catch (e) {
+      // GAP-0025: a silent return here means the token rotation wrote to NO
+      // agents (fleet-wide auth desync) while the caller reports success.
+      process.stderr.write(`oauth: WARNING could not list agents in ${agentsBase}; token rotation reached NO agents: ${(e as Error).message}\n`);
       return;
     }
   }
@@ -480,6 +483,10 @@ function writeTokenToAgents(
 
       atomicWriteSync(envPath, content);
       try { chmodSync(envPath, 0o600); } catch { /* ignore */ }
-    } catch { /* skip agents whose .env we can't write */ }
+    } catch (e) {
+      // GAP-0025: a silent skip leaves this agent on the OLD (rotated-out) token,
+      // which surfaces later as unrelated-looking Claude Code OAuth errors.
+      process.stderr.write(`oauth: WARNING failed to write rotated token to ${name}/.env; agent stays on the OLD token: ${(e as Error).message}\n`);
+    }
   }
 }

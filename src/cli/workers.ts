@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { resolve } from 'path';
 import { resolveEnv } from '../utils/env.js';
-import { IPCClient } from '../daemon/ipc-server.js';
+import { IPCClient } from '../daemon/ipc-client.js';
 
 export const spawnWorkerCommand = new Command('spawn-worker')
   .description('Spawn an ephemeral worker Claude Code session for a parallelized task')

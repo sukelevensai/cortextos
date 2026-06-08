@@ -81,7 +81,10 @@ export type EventCategory =
   | 'message'
   | 'task'
   | 'approval'
-  | 'agent_activity';
+  | 'agent_activity'
+  // GAP-0053: 'pipeline' is a first-class recurring-report category (crm-ops
+  // daily-pipeline-report). Was rejected at runtime, losing the event every run.
+  | 'pipeline';
 
 export type EventSeverity = 'info' | 'warning' | 'error' | 'critical';
 
@@ -164,6 +167,14 @@ export interface AgentConfig {
    */
   crash_window?: { seconds: number; max_crashes?: number };
   model?: string;
+  /**
+   * Whether to launch Claude Code with `--dangerously-skip-permissions`.
+   * Defaults to true (back-compat: agents run unattended). Set to false to keep
+   * Claude Code's permission system engaged so the PermissionRequest hook
+   * (hook-permission-telegram) gates tool use instead of everything auto-running.
+   * Only applies to the claude-code runtime (Hermes never passes the flag).
+   */
+  dangerously_skip_permissions?: boolean;
   working_directory?: string;
   enabled?: boolean;
   crons?: CronEntry[];
@@ -178,6 +189,8 @@ export interface AgentConfig {
   ecosystem?: EcosystemConfig;
   /** Context window % at which to warn agent + user. Default: 70. Absent = observe-only. */
   ctx_warning_threshold?: number;
+  /** Context window % at which to issue a stronger no-new-work warning. Default: 75. */
+  ctx_strong_warning_threshold?: number;
   /** Context window % at which to inject handoff prompt and hard-restart. Default: 80. */
   ctx_handoff_threshold?: number;
   /**

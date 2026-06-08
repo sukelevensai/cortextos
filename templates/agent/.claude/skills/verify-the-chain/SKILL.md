@@ -157,12 +157,12 @@ Does the fix actually work end-to-end against the running process?
 
 This is task-specific. Two non-negotiable rules:
 
-1. **The test MUST use the exact failing input from the original incident**, not just a happy-path variant. If the incident's value was `ALLOWED_USER="8864755248,8372578968"`, the behavioral test runs against THAT literal string. Happy-path variants ("`123,456` works") do not prove the original incident is fixed.
+1. **The test MUST use the exact failing input from the original incident**, not just a happy-path variant. If the incident's value was `ALLOWED_USER="1000000001,1000000002"`, the behavioral test runs against THAT literal string. Happy-path variants ("`123,456` works") do not prove the original incident is fixed.
 
 2. **Distinguish FORMAT GATE (regex / validator level) from BEHAVIORAL (real connectivity)**. A regex test confirms the validator accepts the input. It does NOT confirm the system actually does the work end-to-end (e.g. successful Telegram message delivery). If real-connectivity testing is unavailable in v1, explicitly label the chain entry "BEHAVIORAL = FORMAT GATE only; full connectivity test deferred."
 
 Example for a Telegram poller fix (T1 in the 2026-05-16 plan):
-- Set `ALLOWED_USER="8864755248,8372578968"`.
+- Set `ALLOWED_USER="1000000001,1000000002"`.
 - `pm2 restart cortextos-daemon`.
 - Send messages from both user IDs in the list.
 - Confirm both messages reach the inbox via `cortextos bus check-inbox`.
@@ -203,7 +203,7 @@ Never collapse multiple gaps into "fix is in, just need to restart." Each broken
 
 ### Bad (the 2026-05-16 miss)
 
-> "I found root cause. ROOT CAUSE: chase-assistant ALLOWED_USER='8864755248,8372578968' fails the daemon's single-int regex. Source code was already fixed to allow commas. Just rebuilt dist — fix is sitting there but daemon needs to reload."
+> "I found root cause. ROOT CAUSE: chase-assistant ALLOWED_USER='1000000001,1000000002' fails the daemon's single-int regex. Source code was already fixed to allow commas. Just rebuilt dist — fix is sitting there but daemon needs to reload."
 
 What's wrong: claims "source code was already fixed" without running steps 2-3. The fix was in the working tree but UNCOMMITTED. PR #400 was OPEN, not merged. "Source is fixed" was wrong on two of the six links.
 
@@ -217,7 +217,7 @@ What's wrong: claims "source code was already fixed" without running steps 2-3. 
 > RUNNING: daemon uptime is fresh (2 minutes), so it loaded the rebuilt-but-still-broken dist.
 > BEHAVIORAL: not testable because the fix isn't in dist.
 >
-> Status: fix exists ONLY in uncommitted working tree. To ship: (1) commit, (2) push branch, (3) PR, (4) merge, (5) `npm run build`, (6) `pm2 restart`, (7) behavioral test with literal `"8864755248,8372578968"`."
+> Status: fix exists ONLY in uncommitted working tree. To ship: (1) commit, (2) push branch, (3) PR, (4) merge, (5) `npm run build`, (6) `pm2 restart`, (7) behavioral test with literal `"1000000001,1000000002"`."
 
 This framing reflects reality. The 2026-05-16 framing did not.
 

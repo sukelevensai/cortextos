@@ -522,7 +522,10 @@ export class IPCServer {
           // Race: process was killed after unlink but before bind completed.
           // Clean up the re-created socket and retry once.
           try { unlinkSync(this.socketPath); } catch { /* ignore */ }
-          this.server!.listen(this.socketPath, () => {
+          const listenOptions = process.platform === 'win32'
+            ? { path: this.socketPath, readableAll: true, writableAll: true }
+            : this.socketPath;
+          this.server!.listen(listenOptions as any, () => {
             console.log(`[ipc] Listening on ${this.socketPath} (recovered from stale socket)`);
             resolve();
           });
@@ -531,7 +534,10 @@ export class IPCServer {
         }
       });
 
-      this.server.listen(this.socketPath, () => {
+      const listenOptions = process.platform === 'win32'
+        ? { path: this.socketPath, readableAll: true, writableAll: true }
+        : this.socketPath;
+      this.server.listen(listenOptions as any, () => {
         if (process.platform !== 'win32') {
           try {
             chmodSync(this.socketPath, 0o600);
@@ -863,73 +869,6 @@ export class IPCServer {
       socket.end();
     } catch {
       // Client disconnected
-    }
-  }
-}
-
-/**
- * IPC client for sending commands to the daemon.
- * Used by CLI commands.
- */
-export class IPCClient {
-  private socketPath: string;
-
-  constructor(instanceId: string = 'default') {
-    this.socketPath = getIpcPath(instanceId);
-  }
-
-  /**
-   * Send a command to the daemon and get the response.
-   */
-  async send(request: IPCRequest): Promise<IPCResponse> {
-    const { createConnection } = require('net');
-
-    return new Promise((resolve, reject) => {
-      const socket = createConnection(this.socketPath, () => {
-        socket.write(JSON.stringify(request));
-      });
-
-      let data = '';
-      socket.on('data', (chunk: Buffer) => {
-        data += chunk.toString();
-      });
-
-      socket.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch {
-          reject(new Error('Invalid response from daemon'));
-        }
-      });
-
-      socket.on('error', (err: Error) => {
-        if ((err as any).code === 'ECONNREFUSED' || (err as any).code === 'ENOENT') {
-          resolve({
-            success: false,
-            error: 'Daemon is not running. Start it with: cortextos start',
-          });
-        } else {
-          reject(err);
-        }
-      });
-
-      // Timeout after 5 seconds
-      socket.setTimeout(5000, () => {
-        socket.destroy();
-        reject(new Error('IPC request timed out'));
-      });
-    });
-  }
-
-  /**
-   * Check if the daemon is running.
-   */
-  async isDaemonRunning(): Promise<boolean> {
-    try {
-      const response = await this.send({ type: 'status' });
-      return response.success;
-    } catch {
-      return false;
     }
   }
 }

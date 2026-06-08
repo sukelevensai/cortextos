@@ -78,7 +78,7 @@ async function main(): Promise<void> {
     // 15s timeout, which aborts compaction. Race against a timer so we always
     // exit cleanly with whatever data arrived.
     const raw = await Promise.race([
-      readStdin(),
+      readStdin(10_000),
       new Promise<string>(resolve => setTimeout(() => resolve(''), 10_000)),
     ]);
     let payload: PreCompactPayload = {};

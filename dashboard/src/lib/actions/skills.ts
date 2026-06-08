@@ -130,7 +130,8 @@ export async function fetchSkills(): Promise<SkillInfo[]> {
     }
 
     return skills.sort((a, b) => a.name.localeCompare(b.name));
-  } catch {
+  } catch (err) {
+    console.error('[fetchSkills] error:', err);
     return [];
   }
 }

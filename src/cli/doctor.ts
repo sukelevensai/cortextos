@@ -31,7 +31,7 @@ export const doctorCommand = new Command('doctor')
 
     // Check PM2
     try {
-      const pm2Version = execSync('pm2 --version', { encoding: 'utf-8' }).trim();
+      const pm2Version = execSync('pm2 --version', { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 }).trim();
       checks.push({
         name: 'PM2',
         status: 'pass',
@@ -126,12 +126,23 @@ export const doctorCommand = new Command('doctor')
       const smokeArgs = isWin ? ['/c', 'echo', 'pty-ok'] : ['pty-ok'];
       const p = pty.spawn(smokeCmd, smokeArgs, { name: 'xterm-256color', cols: 80, rows: 24 });
       await new Promise<void>((resolve, reject) => {
+        let done = false;
+        let timer: NodeJS.Timeout;
+        const finish = (fn: () => void) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          fn();
+        };
         p.onData((data: string) => { output += data; });
         p.onExit(({ exitCode }: { exitCode: number }) => {
-          if (exitCode === 0 && output.includes('pty-ok')) resolve();
-          else reject(new Error(`exit ${exitCode}`));
+          if (exitCode === 0 && output.includes('pty-ok')) finish(resolve);
+          else finish(() => reject(new Error(`exit ${exitCode}`)));
         });
-        setTimeout(() => reject(new Error('timed out')), 5000);
+        timer = setTimeout(() => {
+          try { p.kill(); } catch { /* already exited */ }
+          finish(() => reject(new Error('timed out')));
+        }, 5000);
       });
       checks.push({
         name: 'node-pty spawn test',
@@ -340,10 +351,10 @@ export const doctorCommand = new Command('doctor')
             let templateHooks: Record<string, unknown> = {};
             let agentHooks: Record<string, unknown> = {};
             try {
-              templateHooks = (JSON.parse(readFileSync(templateSettings, 'utf-8')).hooks ?? {});
+              templateHooks = (JSON.parse(readFileSync(templateSettings, 'utf-8').replace(/^\uFEFF/, '')).hooks ?? {});
             } catch { continue; }
             try {
-              agentHooks = (JSON.parse(readFileSync(agentSettings, 'utf-8')).hooks ?? {});
+              agentHooks = (JSON.parse(readFileSync(agentSettings, 'utf-8').replace(/^\uFEFF/, '')).hooks ?? {});
             } catch { continue; }
 
             const missing = HOOK_KEYS.filter(k => k in templateHooks && !(k in agentHooks));
@@ -393,7 +404,9 @@ export const doctorCommand = new Command('doctor')
       process.exit(1);
     } else if (warnCount > 0) {
       console.log(`  All critical checks passed, ${warnCount} warning(s). See above for details.\n`);
+      process.exit(0);
     } else {
       console.log('  All checks passed.\n');
+      process.exit(0);
     }
   });

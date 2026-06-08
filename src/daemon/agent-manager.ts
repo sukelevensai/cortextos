@@ -10,6 +10,7 @@ import type { CronDefinition } from '../types/index.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
 import { resolvePaths } from '../utils/paths.js';
+import { logEvent } from '../bus/event.js';
 import { resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -232,6 +233,10 @@ export class AgentManager {
     const inRegistry = this.agents.has(name);
     if (op === 'start') {
       if (inRegistry) {
+        const status = this.agents.get(name)?.process?.getStatus()?.status;
+        if (status === 'crashed' || status === 'halted') {
+          return { ok: true };
+        }
         return { ok: false, code: 'DEDUPED', message: `start request for "${name}" deduped — agent already in registry (in-flight start or already running)` };
       }
       return { ok: true };
@@ -245,6 +250,12 @@ export class AgentManager {
 
   async startAgent(name: string, agentDir: string, config?: AgentConfig, org?: string): Promise<void> {
     if (this.agents.has(name)) {
+      const status = this.agents.get(name)?.process?.getStatus()?.status;
+      if (status === 'crashed' || status === 'halted') {
+        console.log(`[agent-manager] ${name} is ${status} but still in registry. Treating start as recovery restart.`);
+        await this.restartAgent(name);
+        return;
+      }
       // BUG-031: this branch was the workaround for the BUG-011 PTY race
       // (restart-all could send stop+start simultaneously, and the new
       // start would arrive while the old stop's PTY exit was still in
@@ -366,6 +377,12 @@ export class AgentManager {
         telegramApi = new TelegramAPI(botToken);
         // Don't log sensitive user IDs — just indicate the gate is enabled
         log(`Telegram configured (chat_id: ****${String(chatId).slice(-4)}, allowed_user: enabled)`);
+      } else if (botToken && !chatId) {
+        // GAP-0004: BOT_TOKEN valid + ALLOWED_USER present, but CHAT_ID missing ->
+        // Telegram stays disabled. We cannot even send a watchdog alert (no chatId
+        // to send to), so without this line the agent boots Telegram-less silently.
+        // Surface it so the fleet-startup health gate (which greps WARNING) catches it.
+        log(`WARNING: BOT_TOKEN is set but CHAT_ID is missing in .env. Telegram is DISABLED for ${name}. Set CHAT_ID to the numeric Telegram chat ID, or remove BOT_TOKEN to start without Telegram.`);
       }
     }
 
@@ -391,6 +408,14 @@ export class AgentManager {
       const tgChatId = chatId;
       let prevStatus: string | null = null;
       agentProcess.onStatusChanged((status) => {
+        // GAP-0095: also surface lifecycle transitions to the dashboard activity
+        // feed (previously Telegram-only, so the audit trail went dark on
+        // crash/halt/recover). Best-effort; never blocks lifecycle handling.
+        if (status.status === 'crashed' || status.status === 'halted' || (status.status === 'running' && prevStatus === 'crashed')) {
+          try {
+            logEvent(resolvePaths(name, this.instanceId), name, resolvedOrg, 'action', (status.status === 'running' ? 'agent_recovered' : `agent_${status.status}`), status.status === 'running' ? 'info' : 'warning', { crashCount: status.crashCount ?? null, prevStatus });
+          } catch { /* best-effort event write */ }
+        }
         if (status.status === 'crashed') {
           const crashNum = status.crashCount ?? '?';
           tgApi.sendMessage(tgChatId, `Agent ${name} crashed (crash #${crashNum}) — auto-restarting`).catch(() => {});
@@ -1250,6 +1275,7 @@ export class AgentManager {
       return {};
     }
     try {
+      raw = raw.replace(/^\uFEFF/, '');
       return JSON.parse(raw);
     } catch (err) {
       const msg = (err as SyntaxError).message;

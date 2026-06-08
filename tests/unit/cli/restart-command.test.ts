@@ -27,13 +27,13 @@ describe('issue #328: cortextos restart <agent>', () => {
     expect(opts.instance).toBe('default');
   });
 
-  it('describes itself as a stop+start (not a daemon restart)', () => {
+  it('describes itself as an agent respawn pointing away from the daemon', () => {
     // The description must make clear this does NOT bounce the daemon —
     // operator-facing UX guard so users don't reach for this when they
     // actually need `pm2 restart cortextos-daemon`.
     const desc = restartCommand.description().toLowerCase();
-    expect(desc).toContain('stop');
-    expect(desc).toContain('start');
-    expect(desc).toContain('daemon');
+    expect(desc).toContain('respawns');
+    expect(desc).toContain('does not restart the daemon');
+    expect(desc).toContain('pm2 restart cortextos-daemon');
   });
 });

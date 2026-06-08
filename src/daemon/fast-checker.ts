@@ -9,7 +9,7 @@ import { updateApproval } from '../bus/approval.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
-import { stripControlChars } from '../utils/validate.js';
+import { stripControlChars, sanitizeForPtyInjection, wrapFenceSafe } from '../utils/validate.js';
 
 type LogFn = (msg: string) => void;
 type TelegramSafeLink = {
@@ -60,6 +60,7 @@ export class FastChecker {
   // Context monitor state
   private ctxConfigMtime: number = 0;
   private ctxWarningFiredAt: number = 0;    // dedup: 15min cooldown between warnings
+  private ctxStrongWarningFiredAt: number = 0; // dedup: 15min cooldown between strong warnings
   private ctxHandoffFiredAt: number = 0;    // fires once per session (0 = not yet)
   private ctxHandoffDeadlineAt: number = 0; // timestamp after which force-restart fires
   private ctxLastSessionId: string | null = null; // detects new session → clears stale deadline
@@ -120,9 +121,19 @@ export class FastChecker {
     const agentName = this.agent.name;
     this.heartbeatTimer = setInterval(() => {
       const ts = new Date().toISOString();
-      execFile('cortextos', ['bus', 'update-heartbeat', `[watchdog] ${agentName} alive — idle session ${ts}`], (err) => {
-        if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
-      });
+      const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || process.cwd();
+      const cliPath = join(frameworkRoot, 'dist', 'cli.js');
+      if (cliPath) { // GAP-0092: cliPath always set; attempt unconditionally so the watchdog is not a silent no-op when dist is unbuilt (CI/unit env)
+        execFile(
+          process.execPath,
+          [cliPath, 'bus', 'update-heartbeat', `[watchdog] ${agentName} alive - idle session ${ts}`],
+          (err) => {
+            if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
+          },
+        );
+        return;
+      }
+      this.log(`Heartbeat watchdog error: missing Cortex CLI at ${cliPath}`);
     }, HEARTBEAT_INTERVAL_MS);
 
     while (this.running) {
@@ -234,31 +245,32 @@ export class FastChecker {
    * the ``` fence is formatting, not escaping, so attacker text containing ``` or
    * `===` could break out and forge a frame.)
    *
-   * Mechanism: insert a zero-width space (U+200B) inside each dangerous token.
-   * Invisible to a human reader; prevents the literal marker from being
-   * reproduced verbatim. Defense-in-depth alongside the existing fence wrapper.
+   * Mechanism (2026-06 merge): superseded by the upstream #592 engine:
+   * wrapFenceSafe (dynamically-sized fence the body cannot close, body kept
+   * byte-exact) for fenced bodies, sanitizeForPtyInjection (header collapse +
+   * [quoted] prefix + Unicode-whitespace/CR-column-0/control-char handling)
+   * for unfenced header/context fields. The earlier local U+200B-insertion
+   * neutralizeUntrustedText was deleted: layering it under wrapFenceSafe would
+   * embed ZWSPs inside fenced bodies and break byte-exactness (double-escape).
    */
-  static neutralizeUntrustedText(text: string): string {
-    if (!text) return text;
-    return text
-      .replace(/`{3,}/g, (m) => m.split('').join('\u200b')) // code-fence breakout
-      .replace(/={3,}/g, (m) => m.split('').join('\u200b')) // === frame header/footer markers
-      .replace(/Reply using:/gi, 'Reply\u200b using:'); // action-line marker
-  }
 
   /**
    * Format an inbox message for injection.
    * Matches bash fast-checker.sh format exactly.
-   * Untrusted fields (from, text) are frame-marker-neutralized.
+   * Untrusted fields (from, text) are sanitized before framing.
    */
   private formatInboxMessage(msg: InboxMessage): string {
-    const replyNote = msg.reply_to ? ` [reply_to: ${msg.reply_to}]` : '';
-    const safeFrom = FastChecker.neutralizeUntrustedText(String(msg.from ?? ''));
-    const safeText = FastChecker.neutralizeUntrustedText(String(msg.text ?? ''));
+    // reply_to is sender-supplied (send-message arg) — header-quote it too.
+    const replyNote = msg.reply_to ? ` [reply_to: ${sanitizeForPtyInjection(String(msg.reply_to))}]` : '';
+    // msg.text/from are externally influenced (a body can carry its own
+    // fence/header markers; --body-stdin/--body-file made arbitrary bodies easy
+    // to send). The body is wrapped with wrapFenceSafe — a dynamically-sized
+    // fence the body cannot close, with the body left byte-exact so pasted code
+    // blocks stay readable. The inline `from` is collapse-sanitized (it sits in
+    // the header line, not a fence).
+    const safeFrom = sanitizeForPtyInjection(msg.from);
     return `=== AGENT MESSAGE from ${safeFrom}${replyNote} [msg_id: ${msg.id}] ===
-\`\`\`
-${safeText}
-\`\`\`
+${wrapFenceSafe(msg.text)}
 Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.id}
 
 `;
@@ -279,46 +291,49 @@ Reply using: cortextos bus send-message ${safeFrom} normal '<your reply>' ${msg.
     linksBlock?: string,
     senderId?: number | string,
   ): string {
-    // Every free-text field here originates from UNTRUSTED Telegram input (the
-    // sender display name, the message, the replied-to message, the group
-    // history) and is frame-marker-neutralized so none can forge a `=== ... ===`
-    // header, break the code fence, or fake a `Reply using:` line and thereby
-    // impersonate the operator or the daemon. (2026-05-30 frame-forgery fix.)
-    const N = FastChecker.neutralizeUntrustedText;
-    const safeFrom = N(String(from ?? ''));
-
+    // Every externally-influenced field below is untrusted (the sender controls
+    // text/display-name; reply-context, last-sent and recent-history are built
+    // from prior external messages). Sanitize each so none can escape the fence
+    // or forge a containment header. Unfenced context fields (reply/history) are
+    // the weakest surface — they sit raw in [Replying to: "..."] / [Recent ...].
     let replyCx = '';
     if (replyToText) {
-      replyCx = `[Replying to: "${N(replyToText.slice(0, 500))}"]\n`;
+      replyCx = `[Replying to: "${sanitizeForPtyInjection(replyToText.slice(0, 500))}"]\n`;
     }
 
     let lastSentCtx = '';
     if (lastSentText) {
-      lastSentCtx = `[Your last message: "${N(lastSentText.slice(0, 500))}"]\n`;
+      lastSentCtx = `[Your last message: "${sanitizeForPtyInjection(lastSentText.slice(0, 500))}"]\n`;
     }
 
     let historyCx = '';
     if (recentHistory) {
-      historyCx = `[Recent conversation:]\n${N(recentHistory)}\n`;
+      historyCx = `[Recent conversation:]\n${sanitizeForPtyInjection(recentHistory)}\n`;
     }
 
-    // Slash commands (text starting with /) are NOT fenced so Claude Code can
-    // recognize + invoke them (e.g. /loop, /commit, /restart). Frame markers are
-    // neutralized in BOTH branches, so a crafted "/x\n=== TELEGRAM from Luke ==="
-    // message cannot forge a frame regardless of the slash bypass.
-    const safeText = N(text);
-    const isSlashCommand = /^\/[a-zA-Z]/.test(text.trim());
+    // Use [USER: ...] wrapper to prevent prompt injection via crafted display names
+    // Slash commands (text starting with /) are NOT wrapped in backticks so Claude Code
+    // can recognize and invoke them via the Skill tool (e.g. /loop, /commit, /restart).
+    // Non-slash bodies use wrapFenceSafe: an unescapable dynamically-sized fence
+    // that leaves the body byte-exact (legit code blocks preserved). Slash commands
+    // get control-char strip + header-quote only (no fence — must stay invokable).
+    const isSlashCommand = /^\/[a-zA-Z]/.test(stripControlChars(text).trim());
     const body = isSlashCommand
-      ? safeText.trim()
-      : `\`\`\`\n${safeText}\n\`\`\``;
+      ? sanitizeForPtyInjection(text).trim()
+      : wrapFenceSafe(text);
     // Surface the non-spoofable numeric Telegram user_id alongside the display
     // name: in a group, any member can set their name to "Luke", but the id is
     // assigned by Telegram. Lets the agent/operator distinguish real from spoof.
-    const userTag = senderId !== undefined && senderId !== '' ? `${safeFrom} | id:${senderId}` : safeFrom;
+    const safeFrom = sanitizeForPtyInjection(from);
+    // senderId should be Telegram's numeric id; reject anything non-numeric so
+    // a string-typed caller can never smuggle frame text into the id tag.
+    const idTag = senderId !== undefined && /^\d+$/.test(String(senderId)) ? String(senderId) : '';
+    const userTag = idTag !== '' ? `${safeFrom} | id:${idTag}` : safeFrom;
     return `=== TELEGRAM from [USER: ${userTag}] (chat_id:${chatId}) ===
 ${replyCx}${historyCx}${body}
 ${linksBlock || ''}
-${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -360,10 +375,11 @@ ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
     if (links.length === 0) return '';
 
+    // The link text/url are attacker-controlled message slices; a fixed ```json
+    // fence could be closed by a backtick run inside them (Codex pass-1 #2).
+    // wrapFenceSafe sizes the fence above any run in the JSON body instead.
     return `telegram_links_extracted_from_entities:
-\`\`\`json
-${JSON.stringify(links, null, 2)}
-\`\`\`
+${wrapFenceSafe(JSON.stringify(links, null, 2))}
 `;
   }
 
@@ -393,8 +409,9 @@ ${JSON.stringify(links, null, 2)}
     const removed = newReaction.length === 0 && oldReaction.length > 0;
     const label = removed ? `removed ${render(oldReaction)}` : render(newReaction);
 
-    // Frame-forgery: neutralize attacker-controlled display name before framing.
-    return `=== REACTION from [USER: ${FastChecker.neutralizeUntrustedText(from)}] (chat_id:${chatId}) on message ${messageId}: ${label} ===
+    // Frame-forgery: sanitize attacker-controlled display name AND the rendered
+    // reaction label (the emoji string is external payload, not an enum).
+    return `=== REACTION from [USER: ${sanitizeForPtyInjection(from)}] (chat_id:${chatId}) on message ${messageId}: ${sanitizeForPtyInjection(label)} ===
 
 `;
   }
@@ -410,16 +427,13 @@ ${JSON.stringify(links, null, 2)}
     imagePath: string,
     linksBlock?: string,
   ): string {
-    // Frame-forgery: neutralize attacker-controlled fields before framing.
-    const N = FastChecker.neutralizeUntrustedText;
-    return `=== TELEGRAM PHOTO from ${N(from)} (chat_id:${chatId}) ===
+    return `=== TELEGRAM PHOTO from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 caption:
-\`\`\`
-${N(caption)}
-\`\`\`
+${wrapFenceSafe(caption)}
 ${linksBlock || ''}
 local_file: ${imagePath}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -436,17 +450,14 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     fileName: string,
     linksBlock?: string,
   ): string {
-    // Frame-forgery: neutralize attacker-controlled fields before framing.
-    const N = FastChecker.neutralizeUntrustedText;
-    return `=== TELEGRAM DOCUMENT from ${N(from)} (chat_id:${chatId}) ===
+    return `=== TELEGRAM DOCUMENT from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 caption:
-\`\`\`
-${N(caption)}
-\`\`\`
+${wrapFenceSafe(caption)}
 ${linksBlock || ''}
 local_file: ${filePath}
-file_name: ${N(fileName)}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+file_name: ${sanitizeForPtyInjection(fileName)}
+Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -467,16 +478,15 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     duration: number | undefined,
     transcript?: string,
   ): string {
-    // Frame-forgery: neutralize attacker-controlled fields before framing.
-    const N = FastChecker.neutralizeUntrustedText;
     const dur = duration !== undefined ? duration : 'unknown';
     const transcriptBlock = transcript && transcript.trim()
-      ? `transcript:\n\`\`\`\n${N(transcript.trim())}\n\`\`\`\n`
+      ? `transcript:\n${wrapFenceSafe(transcript.trim())}\n`
       : '';
-    return `=== TELEGRAM VOICE from ${N(from)} (chat_id:${chatId}) ===
+    return `=== TELEGRAM VOICE from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 duration: ${dur}s
 local_file: ${filePath}
-${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -494,19 +504,16 @@ ${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your repl
     duration: number | undefined,
     linksBlock?: string,
   ): string {
-    // Frame-forgery: neutralize attacker-controlled fields before framing.
-    const N = FastChecker.neutralizeUntrustedText;
     const dur = duration !== undefined ? duration : 'unknown';
-    return `=== TELEGRAM VIDEO from ${N(from)} (chat_id:${chatId}) ===
+    return `=== TELEGRAM VIDEO from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 caption:
-\`\`\`
-${N(caption)}
-\`\`\`
+${wrapFenceSafe(caption)}
 ${linksBlock || ''}
 duration: ${dur}s
 local_file: ${filePath}
-file_name: ${N(fileName)}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+file_name: ${sanitizeForPtyInjection(fileName)}
+Reply using: cortextos bus send-telegram ${chatId} '<one-line reply only>'
+For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, then run cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as direct shell argument.
 
 `;
   }
@@ -696,6 +703,30 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
+    // Plan-review callbacks: plan_(allow|deny)_{hexId}. These use the same
+    // response-file mechanism as permission prompts, but a distinct prefix
+    // keeps plan approvals auditable instead of blending into generic prompts.
+    const planMatch = data.match(/^plan_(allow|deny)_([a-f0-9]+)$/);
+    if (planMatch) {
+      const [, decision, hexId] = planMatch;
+      const responseFile = join(this.paths.stateDir, `hook-response-${hexId}.json`);
+      writeFileSync(
+        responseFile,
+        JSON.stringify({ decision, response_kind: 'plan_review' }) + '\n',
+        'utf-8',
+      );
+
+      if (this.telegramApi) {
+        try { await this.telegramApi.answerCallbackQuery(callbackQueryId, 'Got it'); } catch { /* ignore */ }
+        if (chatId && messageId) {
+          const label = decision === 'allow' ? 'Plan Approved' : 'Plan Denied';
+          try { await this.telegramApi.editMessageText(chatId, messageId, label); } catch { /* ignore */ }
+        }
+      }
+      this.log(`Plan callback: ${decision} for ${hexId}`);
+      return;
+    }
+
     // Restart callbacks: restart_(allow|deny)_{hexId}
     const restartMatch = data.match(/^restart_(allow|deny)_([a-f0-9]+)$/);
     if (restartMatch) {
@@ -880,7 +911,28 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
-    this.log(`Unhandled callback data: ${data}`);
+    // Inject unhandled callbacks as a Telegram message so the agent can process custom button flows.
+    // senderName (Telegram first_name) and callback_data are untrusted: sanitize both against
+    // PTY-injection before interpolating, matching the text path (sanitizeForPtyInjection at the
+    // `=== TELEGRAM from [USER: ...]` header). This block predates #592; #592's hardening was never
+    // retrofitted here, leaving forged `=== AGENT MESSAGE`/fence-breakout headers un-neutralized.
+    if (chatId && this.agent) {
+      const senderName = sanitizeForPtyInjection(query.from?.first_name || 'User');
+      const safeData = sanitizeForPtyInjection(data);
+      const msg = [
+        `=== TELEGRAM from [USER: ${senderName}] (chat_id:${chatId}) ===`,
+        `callback_data: ${safeData}`,
+        `message_id: ${messageId}`,
+        `Reply using: cortextos bus send-telegram ${chatId} '<your reply>'`,
+      ].join('\n');
+      const injected = this.agent.injectMessage(msg);
+      if (injected && this.telegramApi) {
+        try { await this.telegramApi.answerCallbackQuery(callbackQueryId, 'Got it'); } catch { /* ignore */ }
+      }
+      this.log(`Injected unhandled callback to agent: ${data.slice(0, 60)}`);
+    } else {
+      this.log(`Unhandled callback data (no agent/chatId): ${data}`);
+    }
   }
 
   /**
@@ -970,9 +1022,11 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         this.log(`Urgent signal detected: ${content}`);
         unlinkSync(urgentPath);
 
-        // Inject the urgent message
+        // Inject the urgent message — fence the body unescapably (#592 follow-up)
+        // so a signal payload carrying its own fence can't break out and forge
+        // daemon containment headers.
         if (content) {
-          const urgentMsg = `=== URGENT SIGNAL ===\n\`\`\`\n${content}\n\`\`\`\n\n`;
+          const urgentMsg = `=== URGENT SIGNAL ===\n${wrapFenceSafe(content)}\n\n`;
           this.agent.injectMessage(urgentMsg);
         }
       } catch (err) {
@@ -986,7 +1040,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
    * Re-reads from disk only when the file has changed so dashboard updates take effect
    * within one poll cycle without a daemon restart.
    */
-  private getCtxThresholds(): { warn: number; handoff: number } {
+  private getCtxThresholds(): { warn: number; strong: number; handoff: number } {
     try {
       const configPath = join(this.agent.getAgentDir(), 'config.json');
       const mtime = statSync(configPath).mtimeMs;
@@ -994,6 +1048,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
         const config = this.agent.getConfig();
         config.ctx_warning_threshold = cfg.ctx_warning_threshold;
+        config.ctx_strong_warning_threshold = cfg.ctx_strong_warning_threshold;
         config.ctx_handoff_threshold = cfg.ctx_handoff_threshold;
         this.ctxConfigMtime = mtime;
       }
@@ -1001,6 +1056,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     const config = this.agent.getConfig();
     return {
       warn: config.ctx_warning_threshold ?? 70,
+      strong: config.ctx_strong_warning_threshold ?? 75,
       handoff: config.ctx_handoff_threshold ?? 80,
     };
   }
@@ -1048,6 +1104,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
           this.ctxHandoffFiredAt = 0;
           this.ctxHandoffDeadlineAt = 0;
           this.ctxWarningFiredAt = 0;
+          this.ctxStrongWarningFiredAt = 0;
           this.log(`New session detected (${incomingSessionId.slice(0, 8)}…) — per-session ctx state reset`);
         }
         this.ctxLastSessionId = incomingSessionId;
@@ -1062,7 +1119,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
-    const { warn, handoff } = this.getCtxThresholds();
+    const { warn, strong, handoff } = this.getCtxThresholds();
 
     // No threshold configured — observe-only mode (log but don't act)
     if (this.agent.getConfig().ctx_handoff_threshold === undefined) return;
@@ -1078,13 +1135,22 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       return;
     }
 
-    // Tier 1: warning — PTY injection only, no Telegram ping (context management is internal)
+    // Tier 1: warning. The agent must surface this to the active chat and steer
+    // toward a human-approved wrap instead of silently starting fresh work.
     if (effectivePct >= warn && now - this.ctxWarningFiredAt > 15 * 60_000) {
       this.ctxWarningFiredAt = now;
       const pctRound = Math.round(effectivePct);
-      const statusSuffix = effectivePct >= handoff ? 'Handoff in progress.' : `Handoff triggers at ${handoff}%.`;
-      this.agent.injectMessage(`[CONTEXT] Window at ${pctRound}%. ${statusSuffix}`);
+      const statusSuffix = effectivePct >= strong ? `Strong warning triggers at ${strong}%; handoff triggers at ${handoff}%.` : `Strong warning triggers at ${strong}%.`;
+      this.agent.injectMessage(`[CONTEXT] Window at ${pctRound}%. Context is getting high, but do not panic-wrap early. Tell the active chat to finish the current thread soon, avoid starting large new work, then wrap when the thread reaches a natural stopping point. End the wrap by telling the user the next message should be: git pull. ${statusSuffix}`);
       this.log(`Context warning fired at ${pctRound}%`);
+    }
+
+    // Tier 1b: stronger warning. No new tasks; prepare handoff.
+    if (effectivePct >= strong && now - this.ctxStrongWarningFiredAt > 15 * 60_000) {
+      this.ctxStrongWarningFiredAt = now;
+      const pctRound = Math.round(effectivePct);
+      this.agent.injectMessage(`[CONTEXT STRONG WARNING] Window at ${pctRound}%. Do not start new work. Surface this to the active chat, finish only the current thread, checkpoint important repo/Obsidian state, and prepare to wrap. Handoff triggers at ${handoff}%. Next message after wrap should be: git pull.`);
+      this.log(`Context strong warning fired at ${pctRound}%`);
     }
 
     // Tier 2: handoff (fires once per session lifecycle)
@@ -1097,7 +1163,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         writeFileSync(statusPath, JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }));
       } catch { /* non-fatal */ }
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z';
-      const handoffPrompt = `[CONTEXT HANDOFF REQUIRED] Context is at ${Math.round(effectivePct)}%. Write a handoff document to memory/handoffs/handoff-${ts}.md with these sections: ## Current Tasks, ## Next Actions, ## Active Crons, ## Key Context, ## Files Modified This Session. Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(effectivePct)}%" --handoff-doc <absolute path to the handoff doc you just wrote>. Do this NOW before the context window is exhausted.`;
+      const handoffPrompt = `[CONTEXT HANDOFF REQUIRED] Context is at ${Math.round(effectivePct)}%. Write a handoff document to memory/handoffs/handoff-${ts}.md with these sections: ## Current Tasks, ## Next Actions, ## Active Crons, ## Key Context, ## Files Modified This Session, ## Recommended Skills (the 1-3 skills the next session should load first, each with a one-line reason). Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(effectivePct)}%" --handoff-doc <absolute path to the handoff doc you just wrote>. Do this NOW before the context window is exhausted.`;
       this.agent.injectMessage(handoffPrompt);
       this.log(`Handoff prompt injected at ${Math.round(effectivePct)}%`);
       // Pre-arm .force-fresh so the next restart is always a clean fresh session.
@@ -1158,6 +1224,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     this.ctxHandoffFiredAt = 0;
     this.ctxHandoffDeadlineAt = 0;
     this.ctxWarningFiredAt = 0;
+    this.ctxStrongWarningFiredAt = 0;
 
     // Write .force-fresh + .restart-planned (hardRestart from src/bus/system.ts)
     hardRestart(this.paths, this.agent.name, `CONTEXT-FORCE-RESTART: ${reason}`);

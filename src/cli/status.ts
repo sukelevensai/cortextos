@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { IPCClient } from '../daemon/ipc-server.js';
+import { IPCClient } from '../daemon/ipc-client.js';
 import type { AgentStatus, Heartbeat } from '../types/index.js';
 
 export const statusCommand = new Command('status')

@@ -175,7 +175,8 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     // restarts.log must have received a CRASH entry with the exit code and
     // crash counter. Before the fix, daemon-classified crashes only wrote
     // to stdout and left restarts.log empty.
-    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
+    // Two writes now: the restarts.log audit line + a crashes-detail.log snapshot.
+    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(2);
     const [logPath, logLine] = fsMocks.appendFileSync.mock.calls[0];
     expect(String(logPath)).toContain('/logs/alice/restarts.log');
     expect(String(logLine)).toMatch(/\] CRASH: exit_code=1 crash_count=1 backoff_s=5\b/);
@@ -227,8 +228,10 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     capturedOnExit!(1, 0);
 
     expect(ap.getStatus().status).toBe('crashed');
-    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
+    // Two writes now: restarts.log audit line + crashes-detail.log diagnostic snapshot.
+    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(2);
     expect(String(fsMocks.appendFileSync.mock.calls[0][1])).toMatch(/\] CRASH: /);
+    expect(String(fsMocks.appendFileSync.mock.calls[1][0])).toContain('crashes-detail.log');
   });
 
   it('sessionRefresh() delegates to stop() then start() (in order)', async () => {

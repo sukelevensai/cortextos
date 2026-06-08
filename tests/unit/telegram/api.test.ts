@@ -233,6 +233,23 @@ describe('TelegramAPI.validateCredentials', () => {
     }
   });
 
+  it('post() folds retry_after into the thrown error on 429 (GAP-0084)', async () => {
+    queue({
+      status: 429,
+      body: {
+        ok: false,
+        error_code: 429,
+        description: 'Too Many Requests: retry after 5',
+        parameters: { retry_after: 5 },
+      },
+    });
+
+    const api = new TelegramAPI('111:AAA');
+    // getMe() routes through the shared post(); the 429 retry_after must no longer
+    // be discarded - it has to surface in the thrown error (was invisible before).
+    await expect(api.getMe()).rejects.toThrow(/retry_after=5/);
+  });
+
   it('timeout: fetch never resolves -> reason=network_error with "timed out" detail', async () => {
     // Queue nothing — fetch will just hang. Then advance fake timers past 10s
     // and assert the validator bails with network_error.

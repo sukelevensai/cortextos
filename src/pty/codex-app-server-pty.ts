@@ -68,6 +68,9 @@ function wrapChildProcess(child: ChildProcessWithoutNullStreams): IPty {
 interface ThreadState {
   threadId: string;
   cwd: string;
+  agentName?: string;
+  org?: string;
+  stateSchemaVersion?: number;
   updatedAt: string;
 }
 
@@ -210,6 +213,7 @@ export class CodexAppServerPTY {
       if (content) {
         this.handleInput(content).catch((err) => {
           this._outputBuffer.push(`[codex-app-server] input failed: ${err}\n`);
+          this.emitTurnFailureEvent('codex_app_server_turn_failure', 'input', String(err));
         });
       }
     } else {
@@ -310,7 +314,7 @@ export class CodexAppServerPTY {
 
     const replyToContext = this.extractReplyToContext(beforeReply);
     const replyDirective = chatId
-      ? `Reply via: cortextos bus send-telegram ${chatId} '<your reply>' — this is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
+      ? `Reply via: cortextos bus send-telegram ${chatId} '<one-line reply only>' for short replies. For multiline, bullets, or long replies, write full reply to a temp UTF-8 file and run: cortextos bus send-telegram ${chatId} --message-file <file>. Never pass multiline text as a direct shell argument. This is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
       : null;
     const wrap = (payload: string | null): { payload: string; replyDirective: string | null } | null => {
       if (!payload) return null;
@@ -356,11 +360,14 @@ export class CodexAppServerPTY {
   }
 
   private buildMediaPayload(mediaType: string, beforeReply: string): string | null {
-    const captionMatch = beforeReply.match(/caption:\s*\n```(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n```/);
-    const caption = captionMatch?.[1]?.trim() ?? '';
+    // Match a dynamically-sized fence (3+ backticks): wrapFenceSafe grows the
+    // fence to outlast any backtick run in the body, so the close must be the
+    // same length as the open (backreference \1). Group 2 is the body.
+    const captionMatch = beforeReply.match(/caption:\s*\n(`{3,})(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n\1/);
+    const caption = captionMatch?.[2]?.trim() ?? '';
 
-    const transcriptMatch = beforeReply.match(/transcript:\s*\n```(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n```/);
-    const transcript = transcriptMatch?.[1]?.trim() ?? '';
+    const transcriptMatch = beforeReply.match(/transcript:\s*\n(`{3,})(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n\1/);
+    const transcript = transcriptMatch?.[2]?.trim() ?? '';
 
     const localFileMatch = beforeReply.match(/^local_file:\s*(.+)$/m);
     const localFile = localFileMatch?.[1]?.trim() ?? '';
@@ -598,7 +605,12 @@ export class CodexAppServerPTY {
   }
 
   private async startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> {
-    const persisted = this.readThreadState();
+    if (mode === 'fresh') {
+      this.clearThreadState();
+      this.resetContextStatus();
+    }
+
+    const persisted = mode === 'continue' ? this.readThreadState() : null;
     if (persisted) {
       try {
         const resumed = await this.request<ThreadResponse>('thread/resume', {
@@ -617,18 +629,17 @@ export class CodexAppServerPTY {
     }
 
     // GAP-0068 (identity-bleed fix): on persisted-resume failure (or no persisted
-    // state) we deliberately do NOT fall back to the most-recent thread for this
-    // cwd. codex partitions threads by cwd ONLY (no agent-ownership field), so in a
+    // state) we deliberately do not fall back to the most-recent thread for this
+    // cwd. codex partitions threads by cwd only (no agent-ownership field), so in a
     // shared working_directory that fallback would adopt whichever SIBLING agent was
     // most-recently active — the agent would resume a sibling's conversation and
     // believe it IS the sibling (the 2026-05-30 lantern CFO-identity incident: a
     // failed-resume jay-sidekick adopted the CFO thread and announced "Lantern CFO
     // is back online"). The agent's OWN continuity comes from the per-agent
-    // persisted-thread path above; when that is unavailable we start a FRESH thread
+    // persisted-thread path above; when that is unavailable we start a fresh thread
     // (safe — the agent reloads from its durable memory) rather than risk
-    // cross-identity adoption. `mode` is intentionally not branched on here: the
-    // start-fresh fallthrough is correct for both modes (#437 keeps the per-agent
-    // persisted-resume in both modes; that path is agent-owned and unaffected).
+    // cross-identity adoption. Continue mode uses the per-agent persisted path;
+    // fresh mode ignores it so context handoffs can escape exhausted sessions.
     const started = await this.request<ThreadResponse>('thread/start', {
       cwd: this._cwd,
       ...THREAD_PERMISSION_OVERRIDES,
@@ -638,6 +649,7 @@ export class CodexAppServerPTY {
       persistExtendedHistory: true,
     });
     this.setThreadId(started.result!.thread.id);
+    this.resetContextStatus();
   }
 
   private queueTurn(input: unknown[]): void {
@@ -645,6 +657,7 @@ export class CodexAppServerPTY {
     if (!this._executing) {
       this.drainQueue().catch((err) => {
         this._outputBuffer.push(`[codex-app-server] turn queue failed: ${err}\n`);
+        this.emitTurnFailureEvent('codex_app_server_turn_failure', 'turn_queue', String(err));
       });
     }
   }
@@ -799,6 +812,7 @@ export class CodexAppServerPTY {
         break;
       case 'error':
         this._outputBuffer.push(`[codex-app-server] error: ${JSON.stringify(params)}\n`);
+        this.emitTurnFailureEvent('codex_app_server_error', 'error_notification', JSON.stringify(params));
         this.rejectTurnCompletion(new Error(JSON.stringify(params)));
         break;
       case 'thread/tokenUsage/updated':
@@ -873,14 +887,81 @@ export class CodexAppServerPTY {
     }
   }
 
+  /**
+   * Surface a turn/input failure as an `error`-category event so it reaches the
+   * dashboard activity feed and operator alerts. Without this, the matching
+   * `_outputBuffer.push` only reaches PM2 stdout, so a turn that times out or
+   * errors after the inbound message was already ACKed is invisible (GAP-0065).
+   * Mirrors `emitUnsupportedRequestEvent`: never throws (it runs inside `.catch`
+   * handlers); the `_outputBuffer` message is the user-visible fallback.
+   */
+  private emitTurnFailureEvent(eventType: string, stage: string, detail: string): void {
+    try {
+      const paths = resolvePaths(this._env.agentName, this._env.instanceId, this._env.org);
+      logEvent(
+        paths,
+        this._env.agentName,
+        this._env.org,
+        'error',
+        eventType,
+        'error',
+        {
+          runtime: 'codex-app-server',
+          stage,
+          detail,
+          thread_id: this._threadId,
+        },
+      );
+    } catch {
+      // OutputBuffer message above is the user-visible fallback.
+    }
+  }
+
   private setThreadId(threadId: string): void {
     this._threadId = threadId;
     const state: ThreadState = {
       threadId,
       cwd: this._cwd,
+      agentName: this._env.agentName,
+      org: this._env.org,
+      stateSchemaVersion: 2,
       updatedAt: new Date().toISOString(),
     };
     writeFileSync(this._threadStatePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+  }
+
+  private clearThreadState(): void {
+    if (!existsSync(this._threadStatePath)) return;
+    try {
+      unlinkSync(this._threadStatePath);
+    } catch {
+      // Non-fatal: thread/start below still creates a fresh app-server thread.
+    }
+  }
+
+  private resetContextStatus(): void {
+    const payload = JSON.stringify({
+      used_percentage: 0,
+      context_window_size: this._config.codex_context_cap ?? 256000,
+      exceeds_200k_tokens: false,
+      current_usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      active_context_tokens: 0,
+      active_input_tokens: 0,
+      raw_total_tokens: 0,
+      session_id: this._threadId,
+      written_at: new Date().toISOString(),
+    });
+
+    try {
+      atomicWriteSync(join(this._stateDir, 'context_status.json'), payload);
+    } catch {
+      // Non-fatal: FastChecker will skip stale/missing files gracefully.
+    }
   }
 
   /**
@@ -889,40 +970,54 @@ export class CodexAppServerPTY {
    * monitor. Writes atomically; failures are non-fatal (observability only).
    *
    * Mapping (per codex schema ThreadTokenUsageUpdatedNotification):
-   *   - used_percentage = total.totalTokens / cap * 100  (clamped to [0, 100])
+   *   - used_percentage = active context tokens / cap * 100  (clamped to [0, 100])
    *   - context_window_size = modelContextWindow ?? config.codex_context_cap ?? 256000
-   *   - exceeds_200k_tokens = total.totalTokens > 200000
-   *   - current_usage.{input,output,cache_read} from total.{input,output,cachedInput}Tokens
+   *   - exceeds_200k_tokens = active context tokens > 200000
+   *   - current_usage.{input,output,cache_read} from last.{input,output,cachedInput}Tokens
    *   - session_id = current threadId
+   *
+   * `tokenUsage.total` is cumulative for the whole app-server session. Using it
+   * for live context pressure makes every turn look worse until FastChecker
+   * forces a needless wrap. `tokenUsage.last` is the current request window,
+   * which is the value the context monitor needs.
    */
   private writeContextStatus(params: Record<string, unknown>): void {
     const tokenUsage = isRecord(params.tokenUsage) ? params.tokenUsage : null;
     if (!tokenUsage) return;
+    const last = isRecord(tokenUsage.last) ? tokenUsage.last : null;
     const total = isRecord(tokenUsage.total) ? tokenUsage.total : null;
-    if (!total) return;
-    const totalTokens = typeof total.totalTokens === 'number' ? total.totalTokens : null;
-    if (totalTokens === null) return;
+    const current = last ?? total;
+    if (!current) return;
+    const currentTotalTokens = typeof current.totalTokens === 'number' ? current.totalTokens : null;
+    if (currentTotalTokens === null) return;
+    const cumulativeTotalTokens = typeof total?.totalTokens === 'number' ? total.totalTokens : currentTotalTokens;
+
+    const inputTokens = typeof current.inputTokens === 'number' ? current.inputTokens : 0;
+    const outputTokens = typeof current.outputTokens === 'number' ? current.outputTokens : 0;
+    const cachedInputTokens = typeof current.cachedInputTokens === 'number' ? current.cachedInputTokens : 0;
+    const activeInputTokens = Math.max(0, inputTokens - cachedInputTokens);
+    const activeContextTokens = activeInputTokens + outputTokens;
 
     const modelContextWindow = typeof tokenUsage.modelContextWindow === 'number'
       ? tokenUsage.modelContextWindow
       : null;
     const cap = modelContextWindow ?? this._config.codex_context_cap ?? 256000;
-    const usedPct = cap > 0 ? Math.min(100, (totalTokens / cap) * 100) : null;
-
-    const inputTokens = typeof total.inputTokens === 'number' ? total.inputTokens : 0;
-    const outputTokens = typeof total.outputTokens === 'number' ? total.outputTokens : 0;
-    const cachedInputTokens = typeof total.cachedInputTokens === 'number' ? total.cachedInputTokens : 0;
+    const usedPct = cap > 0 ? Math.min(100, (activeContextTokens / cap) * 100) : null;
 
     const payload = JSON.stringify({
       used_percentage: usedPct,
       context_window_size: cap,
-      exceeds_200k_tokens: totalTokens > 200000,
+      exceeds_200k_tokens: activeContextTokens > 200000,
       current_usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         cache_read_input_tokens: cachedInputTokens,
         cache_creation_input_tokens: 0,
       },
+      active_context_tokens: activeContextTokens,
+      active_input_tokens: activeInputTokens,
+      raw_total_tokens: cumulativeTotalTokens,
+      raw_current_total_tokens: currentTotalTokens,
       session_id: this._threadId,
       written_at: new Date().toISOString(),
     });
@@ -973,7 +1068,31 @@ export class CodexAppServerPTY {
     if (!existsSync(this._threadStatePath)) return null;
     try {
       const parsed = JSON.parse(readFileSync(this._threadStatePath, 'utf-8')) as ThreadState;
-      return parsed.cwd === this._cwd && parsed.threadId ? parsed : null;
+      if (parsed.cwd !== this._cwd || !parsed.threadId) return null;
+
+      if (parsed.agentName && parsed.agentName !== this._env.agentName) {
+        this._outputBuffer.push(
+          `[codex-app-server] ignoring persisted thread owned by agent "${parsed.agentName}" for "${this._env.agentName}"\n`,
+        );
+        this.clearThreadState();
+        return null;
+      }
+
+      if (parsed.org && parsed.org !== this._env.org) {
+        this._outputBuffer.push(
+          `[codex-app-server] ignoring persisted thread owned by org "${parsed.org}" for "${this._env.org}"\n`,
+        );
+        this.clearThreadState();
+        return null;
+      }
+
+      if (!parsed.agentName) {
+        this._outputBuffer.push(
+          `[codex-app-server] legacy thread state has no owner; resuming once and stamping owner "${this._env.agentName}"\n`,
+        );
+      }
+
+      return parsed;
     } catch {
       return null;
     }
@@ -1060,9 +1179,26 @@ export class CodexAppServerPTY {
   private buildEnv(): Record<string, string> {
     const env: Record<string, string> = {};
 
-    const keepVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL', 'TMPDIR'];
+    const keepVars = [
+      'PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL',
+      'TMPDIR', 'TEMP', 'TMP', 'NODE_PATH', 'COMSPEC', 'USERPROFILE',
+      'SystemDrive', 'SystemRoot', 'windir', 'APPDATA', 'LOCALAPPDATA',
+      'ProgramData', 'ALLUSERSPROFILE', 'ProgramFiles', 'ProgramFiles(x86)',
+      'ProgramW6432', 'HOMEDRIVE', 'HOMEPATH', 'PUBLIC', 'PATHEXT',
+    ];
     for (const key of keepVars) {
       if (process.env[key]) env[key] = process.env[key]!;
+    }
+
+    if (platform() === 'win32') {
+      const frameworkBin = join(this._env.frameworkRoot, 'bin');
+      if (existsSync(frameworkBin)) {
+        const entries = (env['PATH'] || '').split(';').filter(Boolean);
+        const hasFrameworkBin = entries.some((entry) => entry.toLowerCase() === frameworkBin.toLowerCase());
+        if (!hasFrameworkBin) {
+          env['PATH'] = [frameworkBin, ...entries].join(';');
+        }
+      }
     }
 
     env['CTX_INSTANCE_ID'] = this._env.instanceId;

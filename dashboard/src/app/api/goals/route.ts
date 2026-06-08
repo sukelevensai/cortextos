@@ -73,7 +73,20 @@ export async function PATCH(request: NextRequest) {
   if (existsSync(goalsPath)) {
     try {
       current = JSON.parse(readFileSync(goalsPath, 'utf-8'));
-    } catch { /* use defaults */ }
+    } catch {
+      // GAP-0056: the file EXISTS but is corrupt. Falling back to the empty
+      // defaults above and then writing `current` would WIPE north_star / goals /
+      // bottleneck on any PATCH (e.g. one that only sets daily_focus). Refuse
+      // instead so a corrupt file cannot silently destroy the strategic goals -
+      // the operator must fix or remove goals.json first.
+      return Response.json(
+        {
+          error: 'goals_corrupt',
+          hint: 'goals.json exists but is not valid JSON; refusing to PATCH to avoid wiping north_star/goals. Fix or remove the file.',
+        },
+        { status: 409 },
+      );
+    }
   }
 
   // Apply updates

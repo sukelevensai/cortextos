@@ -140,6 +140,10 @@ export class AgentPTY {
     // env is passed natively via node-pty options; no bash export commands required.
     // On Windows, npm global installs create .cmd wrappers, not .exe binaries.
     // node-pty's CreateProcess requires the exact wrapper name to resolve correctly.
+    if (platform() === 'win32') {
+      this.hardenWindowsShellEnv(ptyEnv);
+    }
+
     const claudeArgs = this.buildClaudeArgs(mode, prompt);
     const claudeCmd = this.getBinaryName();
 
@@ -228,7 +232,33 @@ export class AgentPTY {
       args.push('--continue');
     }
 
-    args.push('--dangerously-skip-permissions');
+    if (platform() === 'win32') {
+      // Windows agents keep the hard bypass: hardenWindowsShellEnv already
+      // strips bash exposure, so Claude Code's permission gate adds friction
+      // without gain there. NOTE: `dangerously_skip_permissions` config is
+      // therefore a NO-OP on win32 — the gate decision below is non-win32 only.
+      args.push('--permission-mode', 'bypassPermissions');
+      args.push('--disallowedTools', 'Bash,BashTool');
+    } else {
+      // Skip Claude Code's permission system by default (back-compat: agents have
+      // historically run unattended). Set `dangerously_skip_permissions: false` in
+      // the agent config to KEEP the gate on — then Claude Code's PermissionRequest
+      // flow (and the hook-permission-telegram approval) actually engages. Without
+      // this flag the CLI override would suppress any settings.json permission mode.
+      // Only the literal boolean `false` disables the skip; warn on a non-boolean so
+      // a typo (e.g. the string "false") can't silently leave an agent ungated when
+      // the operator intended to engage the gate.
+      const skipPermissions = this.config.dangerously_skip_permissions;
+      if (skipPermissions !== undefined && typeof skipPermissions !== 'boolean') {
+        console.warn(
+          `[agent-pty] ${this.env.agentName}: dangerously_skip_permissions must be true or false ` +
+          `(got ${JSON.stringify(skipPermissions)}); defaulting to skip-on.`,
+        );
+      }
+      if (skipPermissions !== false) {
+        args.push('--dangerously-skip-permissions');
+      }
+    }
 
     if (this.config.model) {
       args.push('--model', this.config.model);
@@ -315,6 +345,46 @@ export class AgentPTY {
   }
 
   /**
+   * Keep Windows Cortex agents on PowerShell while preserving normal git.exe.
+   *
+   * Git for Windows publishes Bash through Git\bin and Git\usr\bin. Claude can
+   * detect those folders and start shell snapshot workers even when the agent
+   * itself was launched from PowerShell. Keeping Git\cmd leaves git.exe working
+   * without exposing bash.exe to long-running agent sessions.
+   */
+  private hardenWindowsShellEnv(env: Record<string, string>): void {
+    const rawPath = env['PATH'] || env['Path'];
+    if (rawPath) {
+      const filteredPath = rawPath
+        .split(';')
+        .filter(Boolean)
+        .filter((entry) => {
+          const normalized = entry.replace(/\//g, '\\').toLowerCase();
+          if (normalized.endsWith('\\git\\bin')) return false;
+          if (normalized.endsWith('\\git\\usr\\bin')) return false;
+          return true;
+        })
+        .join(';');
+      env['PATH'] = filteredPath;
+      delete env['Path'];
+    }
+
+    const frameworkBin = join(this.env.frameworkRoot, 'bin');
+    if (existsSync(frameworkBin)) {
+      const entries = (env['PATH'] || '').split(';').filter(Boolean);
+      const hasFrameworkBin = entries.some((entry) => entry.toLowerCase() === frameworkBin.toLowerCase());
+      if (!hasFrameworkBin) {
+        env['PATH'] = [frameworkBin, ...entries].join(';');
+      }
+    }
+
+    env['CLAUDE_CODE_USE_POWERSHELL_TOOL'] = '1';
+    env['CLAUDE_CODE_SHELL'] = 'powershell.exe';
+    env['CLAUDE_BASH_NO_LOGIN'] = 'true';
+    env['SHELL'] = 'powershell.exe';
+  }
+
+  /**
    * Get a clean base environment (excluding potentially harmful vars).
    */
   private getBaseEnv(): Record<string, string> {
@@ -343,6 +413,7 @@ export class AgentPTY {
       if (!env['LANG']) env['LANG'] = 'en_US.UTF-8';
       if (!env['LC_ALL']) env['LC_ALL'] = 'en_US.UTF-8';
       if (!process.env['PYTHONIOENCODING']) env['PYTHONIOENCODING'] = 'utf-8';
+      this.hardenWindowsShellEnv(env);
     }
 
     return env;

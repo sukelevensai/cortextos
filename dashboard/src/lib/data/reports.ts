@@ -90,6 +90,27 @@ export function getLatestSnapshot(org: string): LatestSnapshot | null {
 // Fleet Health (Phase 1)
 // ---------------------------------------------------------------------------
 
+// Staleness threshold (minutes). Mirrors heartbeats.ts STALE_THRESHOLD_MIN, but
+// intentionally re-declared here: reports.ts deliberately avoids importing from
+// @/lib/config (and thus heartbeats.ts) to preserve turbopack chunk isolation
+// (see CTX_ROOT note at top of file). Keep the two values in sync.
+const STALE_THRESHOLD_MIN = 300;
+
+// Read an agent's live heartbeat age in minutes from disk; null if missing/unreadable
+// so each caller can apply its own fallback.
+function readHeartbeatAgeMin(name: string): number | null {
+  const hbFile = path.join(CTX_ROOT, 'state', name, 'heartbeat.json');
+  try {
+    if (fs.existsSync(hbFile)) {
+      const hb = JSON.parse(fs.readFileSync(hbFile, 'utf-8'));
+      if (hb.last_heartbeat) {
+        return Math.round((Date.now() - new Date(hb.last_heartbeat).getTime()) / 60000);
+      }
+    }
+  } catch { /* unreadable - caller applies its own fallback */ }
+  return null;
+}
+
 export function getFleetHealth(org: string): FleetHealth | null {
   const snapshot = getLatestSnapshot(org);
   if (!snapshot?.health) {
@@ -124,23 +145,13 @@ export function getFleetHealth(org: string): FleetHealth | null {
       errorCount += data.real_errors;
       totalStability += stability;
 
-      // Read live heartbeat for real-time Last Seen
-      let liveAgeMin = data.heartbeat_age_min;
-      const hbFile = path.join(CTX_ROOT, 'state', name, 'heartbeat.json');
-      try {
-        if (fs.existsSync(hbFile)) {
-          const hbData = JSON.parse(fs.readFileSync(hbFile, 'utf-8'));
-          if (hbData.last_heartbeat) {
-            const ageMs = Date.now() - new Date(hbData.last_heartbeat).getTime();
-            liveAgeMin = Math.round(ageMs / 60000);
-          }
-        }
-      } catch { /* use report data as fallback */ }
+      // Read live heartbeat for real-time Last Seen (fallback: report data).
+      const liveAgeMin = readHeartbeatAgeMin(name) ?? data.heartbeat_age_min;
 
       agents.push({
         name,
         heartbeatAgeMin: liveAgeMin,
-        isStale: liveAgeMin > 300, // 5 hours = stale
+        isStale: liveAgeMin > STALE_THRESHOLD_MIN, // 5 hours = stale
         events: data.events,
         realErrors: data.real_errors,
         crashes: data.crashes,
@@ -224,21 +235,12 @@ function getFleetHealthFromHeartbeats(org: string): FleetHealth | null {
   for (const entry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const name = entry.name;
-    const hbFile = path.join(CTX_ROOT, 'state', name, 'heartbeat.json');
-    let ageMin = 9999;
-    try {
-      if (fs.existsSync(hbFile)) {
-        const hb = JSON.parse(fs.readFileSync(hbFile, 'utf-8'));
-        if (hb.last_heartbeat) {
-          ageMin = Math.round((Date.now() - new Date(hb.last_heartbeat).getTime()) / 60000);
-        }
-      }
-    } catch { /* skip */ }
+    const ageMin = readHeartbeatAgeMin(name) ?? 9999;
 
     agents.push({
       name,
       heartbeatAgeMin: ageMin,
-      isStale: ageMin > 300,
+      isStale: ageMin > STALE_THRESHOLD_MIN,
       events: 0,
       realErrors: 0,
       crashes: 0,
