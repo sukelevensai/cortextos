@@ -233,10 +233,31 @@ export class AgentPTY {
     }
 
     if (platform() === 'win32') {
+      // Windows agents keep the hard bypass: hardenWindowsShellEnv already
+      // strips bash exposure, so Claude Code's permission gate adds friction
+      // without gain there. NOTE: `dangerously_skip_permissions` config is
+      // therefore a NO-OP on win32 — the gate decision below is non-win32 only.
       args.push('--permission-mode', 'bypassPermissions');
       args.push('--disallowedTools', 'Bash,BashTool');
     } else {
-      args.push('--dangerously-skip-permissions');
+      // Skip Claude Code's permission system by default (back-compat: agents have
+      // historically run unattended). Set `dangerously_skip_permissions: false` in
+      // the agent config to KEEP the gate on — then Claude Code's PermissionRequest
+      // flow (and the hook-permission-telegram approval) actually engages. Without
+      // this flag the CLI override would suppress any settings.json permission mode.
+      // Only the literal boolean `false` disables the skip; warn on a non-boolean so
+      // a typo (e.g. the string "false") can't silently leave an agent ungated when
+      // the operator intended to engage the gate.
+      const skipPermissions = this.config.dangerously_skip_permissions;
+      if (skipPermissions !== undefined && typeof skipPermissions !== 'boolean') {
+        console.warn(
+          `[agent-pty] ${this.env.agentName}: dangerously_skip_permissions must be true or false ` +
+          `(got ${JSON.stringify(skipPermissions)}); defaulting to skip-on.`,
+        );
+      }
+      if (skipPermissions !== false) {
+        args.push('--dangerously-skip-permissions');
+      }
     }
 
     if (this.config.model) {
