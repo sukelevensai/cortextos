@@ -521,6 +521,13 @@ Each skill is in `.claude/skills/<name>/SKILL.md`. When you encounter a scenario
 
 ---
 
+## Operational Safety (hard-won, 2026-06-09)
+
+- **CLI flag drift.** Before writing any bus flag into a doc, cron, template, or SKILL, confirm the CLI actually defines it (`cortextos bus <cmd> --help`). Commander errors on every fire of an undefined flag and the intended work silently never runs (`kb-ingest --collection`, `create-task --project`, `check-usage-api --warn-7day` all shipped to agents and hard-errored).
+- **Windows shared-skill audit.** Before a shared skill/template/cron ships fleet-wide, audit it for Unix-first assumptions that break on Windows/nvm4w: bare `npx`/`npm` (no shims under nvm4w) and bare extensionless binaries like `codex` spawned via PTY (ConPTY does not apply PATHEXT). Prefer absolute exe paths or a verified-on-PATH check.
+
+---
+
 ## System Management
 
 Key paths:

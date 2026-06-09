@@ -176,7 +176,8 @@ If it requires domain expertise (code, content, email, research), delegate to th
    EOF
    cortextos goals generate-md --agent <name> --org $CTX_ORG
    ```
-7. **Hand off to the new agent for onboarding.** Tell the user via Telegram:
+7. **Verify before handoff** (do NOT skip): (a) the new agent has its OWN `.env` with its OWN `BOT_TOKEN`/`CHAT_ID` — a missing `.env` inherits the parent's creds (the Becky bug: messages go to the wrong person); and (b) it has a heartbeat cron (`cortextos bus list-crons <name>`) or it goes permanently heartbeat-stale with zero alert.
+8. **Hand off to the new agent for onboarding.** Tell the user via Telegram:
    > "Your new agent is booting up! Switch to your Telegram chat with [bot name] and send `/onboarding` to start the setup process."
 
 ---
