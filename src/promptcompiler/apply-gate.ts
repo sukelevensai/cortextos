@@ -333,8 +333,12 @@ export function decideApply(input: unknown): ApplyDecision {
     if (sentinel.gateway_killed === true) vetoes.push('sentinel:gateway_killed');
     if (sentinel.compiler_killed === true) vetoes.push('sentinel:compiler_killed');
     if ((sentinel.pushback_raw as Record<string, unknown>).fired !== false) vetoes.push('sentinel:pushback_raw');
-    // pushback_compiled is the most load-bearing veto: push-back is evaluated on the
+    // pushback_compiled is INTENDED to be the most load-bearing veto: push-back evaluated on the
     // EXPANDED prompt, so a short message that compiles into a >3-file edit must NOT auto-apply.
+    // DOC-NOT-WIRED (2026-06-09): this CHECK is correct, but the upstream compiler
+    // (shadow-compiler.js buildSentinelState) currently sets pushback_compiled = pushback_raw
+    // (deterministic prefilter on the RAW text), so the expanded-prompt evaluation is NOT yet wired.
+    // REQUIRED BEFORE ANY LIVE FLIP: re-run the prefilter on compiled_prompt to populate this for real.
     if ((sentinel.pushback_compiled as Record<string, unknown>).fired !== false) {
       vetoes.push('sentinel:pushback_compiled');
     }
