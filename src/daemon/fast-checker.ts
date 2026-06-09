@@ -1054,10 +1054,21 @@ For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, 
       }
     } catch { /* keep stale values */ }
     const config = this.agent.getConfig();
+    // Defaults below are the claude-opus-4-8 ~1M-window ladder (warn 60% = 600k,
+    // strong 75% = 750k, handoff 90% = 900k). They are MODEL-SPECIFIC: a non-1M
+    // model (e.g. gpt-5-codex) degrades/exhausts at a smaller absolute token count,
+    // so on a smaller window 60% forces a wrap far too early and 90% cuts real
+    // exhaustion headroom. Do NOT treat these as universal -- a model-aware default
+    // is tracked in task_1780971949856_90662804.
+    // NOTE: this function always returns a value (the fallback) for an unset field;
+    // an agent stays observe-only NOT here but in the CALLER -- checkContextStatus()
+    // early-returns when ctx_handoff_threshold is undefined, BEFORE any tier check,
+    // so for a threshold-less agent these defaults are computed but never applied.
+    // Hence a gpt-5-codex agent left threshold-less never inherits this opus ladder.
     return {
-      warn: config.ctx_warning_threshold ?? 70,
+      warn: config.ctx_warning_threshold ?? 60,
       strong: config.ctx_strong_warning_threshold ?? 75,
-      handoff: config.ctx_handoff_threshold ?? 80,
+      handoff: config.ctx_handoff_threshold ?? 90,
     };
   }
 
