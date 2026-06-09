@@ -406,6 +406,19 @@ describe('decideApply — structural validation (fail-safe)', () => {
     expect(d.action).toBe('passthrough');
     expect(d.vetoes).toContain('structure:task_type');
   });
+
+  it('rejects an object whose 22 fields live on the PROTOTYPE, not own props (Codex pass-2)', () => {
+    const attack = Object.create(validTask()); // zero own properties; all fields inherited
+    const d = decideApply(attack);
+    expect(d.action).toBe('passthrough');
+  });
+
+  it('rejects a null-prototype object even with all own fields', () => {
+    const np = Object.assign(Object.create(null), validTask());
+    const d = decideApply(np);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:not_object');
+  });
 });
 
 describe('decideApply — never throws (fuzz)', () => {

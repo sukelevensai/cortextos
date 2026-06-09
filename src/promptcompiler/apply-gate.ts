@@ -81,7 +81,11 @@ const CONTEXT_KINDS = new Set(['file', 'profile', 'memory', 'task', 'message', '
 // --- primitive validators ----------------------------------------------------
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  // Reject custom / null prototypes (default-deny): a hostile Object.create(proto)
+  // with inherited fields, or a class instance, must never satisfy the gate. Real
+  // compiled tasks arrive via JSON.parse, which always yields Object.prototype.
+  return Object.getPrototypeOf(value) === Object.prototype;
 }
 function isString(value: unknown): value is string {
   return typeof value === 'string';
@@ -277,7 +281,9 @@ export function decideApply(input: unknown): ApplyDecision {
       );
     }
 
-    const missingKeys = REQUIRED_TOP_KEYS.filter((k) => !(k in input));
+    // Object.hasOwn (not `in`) so inherited / prototype-polluted keys can't satisfy
+    // the required-key check — a required field must be the task's OWN property.
+    const missingKeys = REQUIRED_TOP_KEYS.filter((k) => !Object.hasOwn(input, k));
     if (missingKeys.length > 0) {
       return passthrough(
         `invalid_compiled_task: missing required keys [${missingKeys.join(', ')}]`,
