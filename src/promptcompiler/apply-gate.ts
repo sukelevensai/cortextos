@@ -10,7 +10,8 @@
  *
  *  1. DEFAULT-DENY. The decision starts at `passthrough` and only becomes `apply`
  *     when EVERY positive condition holds and ZERO veto fires. A missing, malformed,
- *     or unexpected field can never reach the apply branch.
+ *     UNEXPECTED, or wrong-typed field can never reach the apply branch — the task is
+ *     FULLY shape-validated (every field's type/enum) before any decision logic runs.
  *
  *  2. INDEPENDENT VETO LAYER, not a rubber-stamp of the compiler's mode.
  *     `mode === 'silent_compile'` is NECESSARY-BUT-NOT-SUFFICIENT. The sentinels,
@@ -35,7 +36,7 @@
 
 import type { ApplyDecision } from './types.js';
 
-/** All 21 top-level keys the compiled-task schema declares (additionalProperties:false). */
+/** All 22 top-level keys the compiled-task schema declares (additionalProperties:false). */
 const ALLOWED_TOP_KEYS: ReadonlySet<string> = new Set([
   'schema_version',
   'compiled_prompt',
@@ -66,8 +67,36 @@ const REQUIRED_TOP_KEYS: readonly string[] = Array.from(ALLOWED_TOP_KEYS);
 
 const SUPPORTED_SCHEMA_VERSION = 'phase0.v1';
 
+// Enum vocabularies (from the compiled-task schema).
+const TASK_TYPES = new Set(['build', 'research', 'review', 'route', 'comms', 'approval', 'site_build', 'schema', 'redaction', 'unknown']);
+const RISK_CLASSES = new Set(['low', 'medium', 'high', 'critical']);
+const SIGNAL_STRENGTHS = new Set(['none', 'weak', 'medium', 'strong']);
+const MATERIALITIES = new Set(['none', 'low', 'medium', 'high']);
+const MODES = new Set(['silent_compile', 'notify_assumption', 'confirm_required', 'ask_questions', 'press_me', 'approval_gate', 'reject']);
+const ORIGINS = new Set(['user_typed', 'compiler_routed', 'non_owner_typed', 'system_cron', 'agent_message']);
+const REVIEW_STATUSES = new Set(['known_reviewed', 'known_unreviewed', 'unknown']);
+const TRUSTS = new Set(['trusted', 'untrusted']);
+const CONTEXT_KINDS = new Set(['file', 'profile', 'memory', 'task', 'message', 'policy', 'none']);
+
+// --- primitive validators ----------------------------------------------------
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+function isBoolean(value: unknown): value is boolean {
+  return typeof value === 'boolean';
+}
+function isEnum(value: unknown, set: ReadonlySet<string>): boolean {
+  return typeof value === 'string' && set.has(value);
+}
+function isTextItem(value: unknown): boolean {
+  return isPlainObject(value) && isNonEmptyString(value.text);
 }
 
 /** Render an unknown enum-ish value for a veto code without throwing. */
@@ -79,31 +108,145 @@ function describe(value: unknown): string {
   return typeof value;
 }
 
+// --- composite shape validators ----------------------------------------------
+
+/** A push-back state is valid only if fully well-formed (default-deny on malformed). */
+function isValidPushback(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    isBoolean(value.fired) &&
+    Array.isArray(value.matching_rules) &&
+    isEnum(value.risk_floor, RISK_CLASSES)
+  );
+}
+
+function isValidSlashExemption(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    isBoolean(value.active) &&
+    isBoolean(value.command_at_head) &&
+    isBoolean(value.authorized_sender)
+  );
+}
+
+function isValidMaxOneInterruption(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    isBoolean(value.applies) &&
+    Number.isInteger(value.merged_surface_count) &&
+    (value.merged_surface_count as number) >= 0
+  );
+}
+
+function isValidSentinelState(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    isValidPushback(value.pushback_raw) &&
+    isValidPushback(value.pushback_compiled) &&
+    isValidSlashExemption(value.slash_command_exemption) &&
+    isBoolean(value.gateway_killed) &&
+    isBoolean(value.compiler_killed) &&
+    isBoolean(value.review_status_fresh) &&
+    isValidMaxOneInterruption(value.max_one_interruption)
+  );
+}
+
+function isValidSenderAuth(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    isBoolean(value.profile_owner) &&
+    isBoolean(value.command_authorized) &&
+    isString(value.profile_scope)
+  );
+}
+
+function isValidOutputContract(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    isNonEmptyString(value.artifact) &&
+    isNonEmptyString(value.format) &&
+    isNonEmptyString(value.destination) &&
+    isEnum(value.review_status, REVIEW_STATUSES) &&
+    isBoolean(value.deterministically_bound)
+  );
+}
+
+function isValidAmbiguityMap(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    isEnum(value.materiality, MATERIALITIES) &&
+    Array.isArray(value.missing_slots) &&
+    Array.isArray(value.candidate_interpretations) &&
+    isPlainObject(value.evpi_operands)
+  );
+}
+
+/** trust_tags: schema minItems 1; every span well-formed with a valid trust enum. */
+function isValidTrustTags(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length >= 1 &&
+    value.every((tag) => isPlainObject(tag) && isNonEmptyString(tag.span_id) && isEnum(tag.trust, TRUSTS))
+  );
+}
+
+/** context_to_load: may be empty, but every present ref must be well-formed. */
+function isValidContextToLoad(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (ref) =>
+        isPlainObject(ref) &&
+        isNonEmptyString(ref.ref) &&
+        isEnum(ref.kind, CONTEXT_KINDS) &&
+        isString(ref.scope) &&
+        isEnum(ref.trust, TRUSTS),
+    )
+  );
+}
+
 /**
- * Default-deny read of a push-back state. Returns true (i.e. VETO) unless the value
- * is a well-formed push-back object whose `fired` is explicitly `false`. A missing
- * or malformed push-back state is treated as fired — the safe direction.
- *
- * `pushback_compiled` is the most load-bearing veto: push-back is evaluated on the
- * EXPANDED prompt, so a 5-word message that compiles into a 6-file edit trips the
- * >3-files trigger and must NOT auto-apply.
+ * Full shape validation of every required field. Returns a list of invalid-field
+ * codes (empty => structurally valid). ANY entry forces passthrough (invariant 1).
+ * Patterns (hash format, scope grammar) are validated only as strings to avoid
+ * over-rejecting real compiler output on a format nuance — the decision-critical
+ * enums, booleans, and object shapes are validated strictly.
  */
-function pushbackFiredOrMissing(value: unknown): boolean {
-  if (!isPlainObject(value)) return true;
-  return value.fired !== false;
-}
+function structuralErrors(t: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  const bad = (field: string): void => {
+    errors.push(`structure:${field}`);
+  };
 
-/** True (VETO) if trust_tags is malformed or any span is untrusted. */
-function hasUntrustedSpan(value: unknown): boolean {
-  if (!Array.isArray(value)) return true; // schema: minItems 1; malformed -> deny
-  return value.some((tag) => !isPlainObject(tag) || tag.trust !== 'trusted');
-}
+  if (!isNonEmptyString(t.compiled_prompt)) bad('compiled_prompt');
+  if (!isNonEmptyString(t.intent_summary)) bad('intent_summary');
+  if (!isEnum(t.task_type, TASK_TYPES)) bad('task_type');
+  if (!isNonEmptyString(t.target_agent)) bad('target_agent');
+  if (!isValidContextToLoad(t.context_to_load)) bad('context_to_load');
+  if (!Array.isArray(t.constraints) || !t.constraints.every(isTextItem)) bad('constraints');
+  if (!Array.isArray(t.success_criteria) || t.success_criteria.length < 1 || !t.success_criteria.every(isTextItem)) {
+    bad('success_criteria');
+  }
+  if (!isValidOutputContract(t.output_contract)) bad('output_contract');
+  if (!isEnum(t.risk_class, RISK_CLASSES)) bad('risk_class');
+  if (!isEnum(t.signal_strength, SIGNAL_STRENGTHS)) bad('signal_strength');
+  if (!isValidAmbiguityMap(t.ambiguity_map)) bad('ambiguity_map');
+  if (!isEnum(t.mode, MODES)) bad('mode');
+  if (!Array.isArray(t.assumptions) || !t.assumptions.every(isTextItem)) bad('assumptions');
+  if (!isNonEmptyString(t.source_message_hash)) bad('source_message_hash');
+  if (!isNonEmptyString(t.sender_id)) bad('sender_id');
+  if (!isValidSenderAuth(t.sender_auth)) bad('sender_auth');
+  if (!Array.isArray(t.retrieval_scopes) || t.retrieval_scopes.length < 1 || !t.retrieval_scopes.every(isNonEmptyString)) {
+    bad('retrieval_scopes');
+  }
+  if (!isEnum(t.invocation_origin, ORIGINS)) bad('invocation_origin');
+  if (!isValidSentinelState(t.sentinel_state)) bad('sentinel_state');
+  if (!Array.isArray(t.provenance_tags) || t.provenance_tags.length < 1 || !t.provenance_tags.every(isPlainObject)) {
+    bad('provenance_tags');
+  }
+  if (!isValidTrustTags(t.trust_tags)) bad('trust_tags');
 
-/** True (VETO) if context_to_load is malformed or any loaded ref is untrusted. */
-function hasUntrustedContext(value: unknown): boolean {
-  if (!Array.isArray(value)) return true;
-  // An empty context list is valid (read-nothing) and not itself a veto.
-  return value.some((ref) => !isPlainObject(ref) || ref.trust === 'untrusted');
+  return errors;
 }
 
 function passthrough(reason: string, vetoes: string[]): ApplyDecision {
@@ -120,7 +263,7 @@ function passthrough(reason: string, vetoes: string[]): ApplyDecision {
  */
 export function decideApply(input: unknown): ApplyDecision {
   try {
-    // --- Step 1: structural validation (any failure -> passthrough) ------------
+    // --- Step 1: top-level structure -------------------------------------------
     if (!isPlainObject(input)) {
       return passthrough('invalid_compiled_task: not an object', ['structure:not_object']);
     }
@@ -149,7 +292,16 @@ export function decideApply(input: unknown): ApplyDecision {
       );
     }
 
-    // --- Step 2: collect ALL applicable vetoes (default-deny, no short-circuit) -
+    // --- Step 2: full field-shape validation (any failure -> passthrough) ------
+    // Returning 'apply' vouches the WHOLE task is safe to execute (the executor
+    // reads compiled_prompt etc.), so a malformed field anywhere must deny.
+    const shapeErrors = structuralErrors(input);
+    if (shapeErrors.length > 0) {
+      return passthrough(`invalid_compiled_task: malformed fields [${shapeErrors.join(', ')}]`, shapeErrors);
+    }
+
+    // --- Step 3: collect ALL applicable vetoes (default-deny, no short-circuit) -
+    // Every field below is now shape-validated; the reads are still defensive.
     const vetoes: string[] = [];
 
     // Necessary mode: silent_compile ONLY (notify_assumption and every gate mode
@@ -164,36 +316,33 @@ export function decideApply(input: unknown): ApplyDecision {
     }
 
     // Independent ambiguity check: only non-material ambiguity may auto-apply.
-    const ambiguityMap = input.ambiguity_map;
-    const materiality = isPlainObject(ambiguityMap) ? ambiguityMap.materiality : undefined;
+    const ambiguityMap = input.ambiguity_map as Record<string, unknown>;
+    const materiality = ambiguityMap.materiality;
     if (materiality !== 'none' && materiality !== 'low') {
       vetoes.push(`materiality:${describe(materiality)}`);
     }
 
-    // Sentinel vetoes.
-    const sentinel = input.sentinel_state;
-    if (!isPlainObject(sentinel)) {
-      vetoes.push('sentinel:malformed');
-    } else {
-      if (sentinel.gateway_killed === true) vetoes.push('sentinel:gateway_killed');
-      if (sentinel.compiler_killed === true) vetoes.push('sentinel:compiler_killed');
-      if (pushbackFiredOrMissing(sentinel.pushback_raw)) vetoes.push('sentinel:pushback_raw');
-      if (pushbackFiredOrMissing(sentinel.pushback_compiled)) {
-        vetoes.push('sentinel:pushback_compiled');
-      }
-      // Stale classifier -> fail-closed-degrade to confirm-bias: do not auto-apply.
-      if (sentinel.review_status_fresh !== true) vetoes.push('sentinel:review_status_stale');
-      // Slash-command exemption is OWNER-ONLY (R52): an active exemption from a
-      // non-authorized sender (e.g. a non-owner typing /deploy-leads) is a veto.
-      const exemption = sentinel.slash_command_exemption;
-      if (isPlainObject(exemption) && exemption.active === true && exemption.authorized_sender !== true) {
-        vetoes.push('sentinel:slash_exemption_unauthorized');
-      }
+    // Sentinel vetoes (shape validated above).
+    const sentinel = input.sentinel_state as Record<string, unknown>;
+    if (sentinel.gateway_killed === true) vetoes.push('sentinel:gateway_killed');
+    if (sentinel.compiler_killed === true) vetoes.push('sentinel:compiler_killed');
+    if ((sentinel.pushback_raw as Record<string, unknown>).fired !== false) vetoes.push('sentinel:pushback_raw');
+    // pushback_compiled is the most load-bearing veto: push-back is evaluated on the
+    // EXPANDED prompt, so a short message that compiles into a >3-file edit must NOT auto-apply.
+    if ((sentinel.pushback_compiled as Record<string, unknown>).fired !== false) {
+      vetoes.push('sentinel:pushback_compiled');
+    }
+    // Stale classifier -> fail-closed-degrade to confirm-bias: do not auto-apply.
+    if (sentinel.review_status_fresh !== true) vetoes.push('sentinel:review_status_stale');
+    // Slash-command exemption is OWNER-ONLY (R52): an active exemption from a
+    // non-authorized sender (e.g. a non-owner typing /deploy-leads) is a veto.
+    const exemption = sentinel.slash_command_exemption as Record<string, unknown>;
+    if (exemption.active === true && exemption.authorized_sender !== true) {
+      vetoes.push('sentinel:slash_exemption_unauthorized');
     }
 
     // Sender auth: only the profile owner's own messages may auto-apply.
-    const senderAuth = input.sender_auth;
-    if (!isPlainObject(senderAuth) || senderAuth.profile_owner !== true) {
+    if ((input.sender_auth as Record<string, unknown>).profile_owner !== true) {
       vetoes.push('sender:not_profile_owner');
     }
 
@@ -203,11 +352,14 @@ export function decideApply(input: unknown): ApplyDecision {
       vetoes.push(`origin:${describe(input.invocation_origin)}`);
     }
 
-    // Trust: untrusted spans are DATA-ONLY and may never drive a silent auto-apply.
-    if (hasUntrustedSpan(input.trust_tags)) vetoes.push('trust:untrusted_span');
-    if (hasUntrustedContext(input.context_to_load)) vetoes.push('trust:untrusted_context');
+    // Trust: untrusted spans/context are DATA-ONLY and may never drive a silent
+    // auto-apply. Default-deny: anything not explicitly 'trusted' is a veto.
+    const trustTags = input.trust_tags as Array<Record<string, unknown>>;
+    if (trustTags.some((tag) => tag.trust !== 'trusted')) vetoes.push('trust:untrusted_span');
+    const contextRefs = input.context_to_load as Array<Record<string, unknown>>;
+    if (contextRefs.some((ref) => ref.trust !== 'trusted')) vetoes.push('trust:untrusted_context');
 
-    // --- Step 3: verdict --------------------------------------------------------
+    // --- Step 4: verdict --------------------------------------------------------
     if (vetoes.length === 0) {
       return {
         action: 'apply',

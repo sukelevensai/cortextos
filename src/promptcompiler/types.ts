@@ -94,10 +94,10 @@ export interface OutputContract {
 }
 
 /**
- * The fields of a compiled task the apply-gate depends on. The full schema has 21
- * required top-level keys (see APPLY_GATE_REQUIRED_KEYS in apply-gate.ts); the
- * runtime gate validates all of them are present, but only the typed fields below
- * are read for the decision.
+ * The fields of a compiled task the apply-gate depends on. The full schema has 22
+ * required top-level keys (see REQUIRED_TOP_KEYS in apply-gate.ts); the runtime gate
+ * validates all of them are present, but only the typed fields below are read for
+ * the decision.
  */
 export interface CompiledTask {
   schema_version: string;

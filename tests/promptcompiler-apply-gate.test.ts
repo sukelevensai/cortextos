@@ -190,20 +190,47 @@ describe('decideApply — sentinel vetoes', () => {
     expect(d.vetoes).toContain('sentinel:pushback_compiled');
   });
 
-  it('a MISSING pushback_compiled is treated as fired (default-deny)', () => {
+  it('a MISSING pushback_compiled fails shape validation (default-deny)', () => {
     const t = validTask();
     delete t.sentinel_state.pushback_compiled;
     const d = decideApply(t);
     expect(d.action).toBe('passthrough');
-    expect(d.vetoes).toContain('sentinel:pushback_compiled');
+    expect(d.vetoes).toContain('structure:sentinel_state');
   });
 
-  it('a MALFORMED pushback_compiled is treated as fired (default-deny)', () => {
+  it('a MALFORMED pushback_compiled fails shape validation (default-deny)', () => {
     const t = validTask();
     t.sentinel_state.pushback_compiled = 'nope';
     const d = decideApply(t);
     expect(d.action).toBe('passthrough');
-    expect(d.vetoes).toContain('sentinel:pushback_compiled');
+    expect(d.vetoes).toContain('structure:sentinel_state');
+  });
+
+  it('a well-formed-looking pushback with fired=false but MISSING siblings is rejected', () => {
+    const t = validTask();
+    // Codex pass-1 finding 2: {fired:false} without matching_rules/risk_floor must not pass.
+    t.sentinel_state.pushback_raw = { fired: false, extra: 'hostile' };
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:sentinel_state');
+  });
+
+  it('a non-boolean kill flag (e.g. "true") fails shape validation (default-deny)', () => {
+    const t = validTask();
+    // Codex pass-1 finding 5: gateway_killed must be a real boolean, not a truthy string.
+    t.sentinel_state.gateway_killed = 'true';
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:sentinel_state');
+  });
+
+  it('a malformed slash_command_exemption shape fails validation (default-deny)', () => {
+    const t = validTask();
+    // Codex pass-1 finding 6: a string exemption must not silently pass.
+    t.sentinel_state.slash_command_exemption = 'active';
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:sentinel_state');
   });
 
   it('stale review_status (review_status_fresh=false) -> passthrough', () => {
@@ -231,7 +258,7 @@ describe('decideApply — sentinel vetoes', () => {
     t.sentinel_state = null;
     const d = decideApply(t);
     expect(d.action).toBe('passthrough');
-    expect(d.vetoes).toContain('sentinel:malformed');
+    expect(d.vetoes).toContain('structure:sentinel_state');
   });
 });
 
@@ -277,7 +304,33 @@ describe('decideApply — trust vetoes', () => {
     t.trust_tags = 'nope';
     const d = decideApply(t);
     expect(d.action).toBe('passthrough');
-    expect(d.vetoes).toContain('trust:untrusted_span');
+    expect(d.vetoes).toContain('structure:trust_tags');
+  });
+
+  it('an EMPTY trust_tags array fails validation (schema minItems 1, default-deny)', () => {
+    const t = validTask();
+    // Codex pass-1 finding 3: [] must not count as "trusted".
+    t.trust_tags = [];
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:trust_tags');
+  });
+
+  it('a context ref with a MISSING trust field fails validation (default-deny)', () => {
+    const t = validTask();
+    // Codex pass-1 finding 4: a ref without a valid trust must not pass.
+    t.context_to_load = [{ ref: 'x', kind: 'file', scope: 'sitesmith-only' }];
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:context_to_load');
+  });
+
+  it('a context ref with an INVALID trust value fails validation (default-deny)', () => {
+    const t = validTask();
+    t.context_to_load = [{ ref: 'x', kind: 'file', scope: 'sitesmith-only', trust: 'maybe' }];
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:context_to_load');
   });
 });
 
@@ -312,6 +365,46 @@ describe('decideApply — structural validation (fail-safe)', () => {
     const d = decideApply(t);
     expect(d.action).toBe('passthrough');
     expect(d.vetoes).toContain('structure:schema_version');
+  });
+
+  it('rejects all-22-keys-present but compiled_prompt=null (Codex pass-1 finding 1)', () => {
+    const t = validTask();
+    t.compiled_prompt = null;
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:compiled_prompt');
+  });
+
+  it('rejects an empty-string compiled_prompt', () => {
+    const t = validTask();
+    t.compiled_prompt = '';
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:compiled_prompt');
+  });
+
+  it('rejects a non-string target_agent (e.g. an object)', () => {
+    const t = validTask();
+    t.target_agent = { hostile: true };
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:target_agent');
+  });
+
+  it('rejects an output_contract missing a required field', () => {
+    const t = validTask();
+    delete t.output_contract.deterministically_bound;
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:output_contract');
+  });
+
+  it('rejects a bad task_type enum', () => {
+    const t = validTask();
+    t.task_type = 'destroy';
+    const d = decideApply(t);
+    expect(d.action).toBe('passthrough');
+    expect(d.vetoes).toContain('structure:task_type');
   });
 });
 
