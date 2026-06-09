@@ -9,6 +9,7 @@ import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTa
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
+import { logCtxQuality } from '../bus/ctx-quality.js';
 import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
@@ -473,6 +474,18 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     logEvent(paths, env.agentName, env.org, category as EventCategory, event, severity as EventSeverity, opts.meta);
     console.log(`Logged ${category}/${event} (${severity})`);
+  });
+
+busCommand
+  .command('log-ctx-quality')
+  .description('A5 instrumentation: flag a context-quality observation paired with the live token count, for degradation-onset measurement')
+  .argument('<note>', 'The quality observation (what degraded, in your own words)')
+  .option('--source <source>', 'Who flagged it: agent (self) or user', 'agent')
+  .action((note: string, opts: { source: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    logCtxQuality(paths, env.agentName, note, opts.source);
+    console.log(`Logged ctx-quality observation for ${env.agentName} (source=${opts.source})`);
   });
 
 busCommand
