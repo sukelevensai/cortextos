@@ -65,5 +65,8 @@
     "community_publish": {
       "enabled": false
     }
-  }
+  },
+  "ctx_warning_threshold": 60,
+  "ctx_strong_warning_threshold": 75,
+  "ctx_handoff_threshold": 90
 }

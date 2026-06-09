@@ -25,5 +25,6 @@
   ],
   "model": "{{model}}",
   "ctx_warning_threshold": 60,
+  "ctx_strong_warning_threshold": 65,
   "ctx_handoff_threshold": 70
 }
