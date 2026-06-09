@@ -39,6 +39,14 @@ Read this file on every session start. Full reference: `.claude/skills/guardrail
 | About to ask the user a question | "Let me ask about X" | Check if the answer is in: logs, source files, bus state, config, git history, another agent's state, or the knowledge base. Only ask for judgment calls, decisions, private info, or things genuinely not in the system. |
 | Finishing a task or sending a status update | "What should I do next?" or "Let me know what you'd like" | State your next action. Never end with an open ask. |
 
+### Operational Hard-Won (2026-06-09)
+
+| Trigger | Red Flag Thought | Required Action |
+|---------|-----------------|-----------------|
+| Tool returns SUCCESS / 200 / "Done!" / "Message sent" | "It said it worked, so it worked" | Verify the ARTIFACT, not the status string: count chunks ingested, re-fetch the row written, read the delivered message, confirm the token authenticates. A green signal is a claim, not proof. |
+| On resume, about to send Telegram / restart / claim a thread | "I know who I am and which branch I am on" | Before ANY external emit, confirm own identity + working_directory + active threadId against config/env, and check git branch is still yours - shared-tree agents cross-resume each other's threads and branches switch underfoot. |
+| About to ack-inbox before the work the message asked for is durably done | "I'll ACK now and handle it" | ACK only AFTER the action is committed/written - an ACKed-then-lost message is a silently dropped task. If a turn may fail mid-handle, do the work first, ACK last. |
+
 For the complete red flag table (15 patterns), see `.claude/skills/guardrails-reference/SKILL.md`.
 
 ---

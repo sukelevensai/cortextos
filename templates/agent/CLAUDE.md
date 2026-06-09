@@ -144,7 +144,8 @@ Sessions auto-restart with `--continue` every ~71 hours. On context exhaustion, 
 3. Create the agent: `cortextos add-agent <name> --template agent`
 4. Edit `.env` with BOT_TOKEN and CHAT_ID
 5. Enable it: `cortextos start <name>`
-6. **Hand off to the new agent for onboarding.** Tell the user via Telegram:
+6. **Verify before handoff** (do NOT skip): (a) the new agent has its OWN `.env` with its OWN `BOT_TOKEN`/`CHAT_ID` — a missing `.env` inherits the parent's creds (the Becky bug: messages go to the wrong person); and (b) it has a heartbeat cron (`cortextos bus list-crons <name>`) or it goes permanently heartbeat-stale with zero alert.
+7. **Hand off to the new agent for onboarding.** Tell the user via Telegram:
    > "Your new agent is booting up! Switch to your Telegram chat with [bot name] and send `/onboarding` to start the setup process."
 
 ---
