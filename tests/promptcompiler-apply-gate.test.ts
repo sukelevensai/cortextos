@@ -95,12 +95,6 @@ describe('decideApply — happy path', () => {
     expect(decideApply(t).action).toBe('apply');
   });
 
-  it('compiler_routed origin is auto-apply-eligible', () => {
-    const t = validTask();
-    t.invocation_origin = 'compiler_routed';
-    expect(decideApply(t).action).toBe('apply');
-  });
-
   it('materiality "low" is still eligible', () => {
     const t = validTask();
     t.ambiguity_map.materiality = 'low';
@@ -271,8 +265,8 @@ describe('decideApply — sender / origin vetoes', () => {
     expect(d.vetoes).toContain('sender:not_profile_owner');
   });
 
-  for (const origin of ['non_owner_typed', 'system_cron', 'agent_message']) {
-    it(`origin "${origin}" -> passthrough`, () => {
+  for (const origin of ['compiler_routed', 'non_owner_typed', 'system_cron', 'agent_message']) {
+    it(`origin "${origin}" -> passthrough (V1 is user_typed only)`, () => {
       const t = validTask();
       t.invocation_origin = origin;
       const d = decideApply(t);

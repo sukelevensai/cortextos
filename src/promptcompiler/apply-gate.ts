@@ -352,9 +352,10 @@ export function decideApply(input: unknown): ApplyDecision {
       vetoes.push('sender:not_profile_owner');
     }
 
-    // Invocation origin: only the owner's typed message or a compiler re-route.
-    // No auto-apply on non-owner, cron, or agent-to-agent traffic (V1 scope).
-    if (input.invocation_origin !== 'user_typed' && input.invocation_origin !== 'compiler_routed') {
+    // Invocation origin: V1 is Luke-originated ONLY (`user_typed`), per the LOCKED
+    // spec. No auto-apply on compiler_routed (un-ratified widening — deferred),
+    // non-owner, cron, or agent-to-agent traffic.
+    if (input.invocation_origin !== 'user_typed') {
       vetoes.push(`origin:${describe(input.invocation_origin)}`);
     }
 
