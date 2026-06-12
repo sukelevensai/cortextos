@@ -18,6 +18,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, unlinkSync, mk
 import { join } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
+import { readTodaysCrashCount } from '../utils/crash-count.js';
 
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;         // 10 minutes
 const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
@@ -311,34 +312,21 @@ async function main(): Promise<void> {
     }
   }
 
-  // Track crash count (real crashes only).
+  // GAP-0110: source the displayed crash count from the daemon's AUTHORITATIVE
+  // ledger (logs/<agent>/.crash_count_today, written by AgentProcess.handleExit
+  // on a real PTY-exit crash) -- NOT a parallel state/ counter. The old state/
+  // counter incremented on EVERY markerless SessionEnd, including healthy
+  // cold-boot session cycles that never reach handleExit, so it fabricated
+  // "N crashes today / max_crashes_per_day reached" on a working agent (the lie
+  // Luke flagged 2026-06-10). This hook fires BEFORE handleExit records the
+  // current exit, so the count reflects crashes up to (not including) the
+  // in-flight one: a benign off-by-one on a genuine crash, and the correct 0 on
+  // a phantom session-end. The daemon's in-memory crashCount remains the
+  // authoritative restart/HALT gate; this is the notification's view only.
   const today = new Date().toISOString().split('T')[0];
-  const countFile = join(stateDir, '.crash_count_today');
   let crashCount = 0;
-  if (endType === 'crash') {
-    try {
-      const data = readFileSync(countFile, 'utf-8').trim();
-      const [date, count] = data.split(':');
-      crashCount = date === today ? parseInt(count, 10) + 1 : 1;
-    } catch {
-      crashCount = 1;
-    }
-    try {
-      writeFileSync(countFile, `${today}:${crashCount}`, 'utf-8');
-    } catch (e) {
-      // GAP-0041: silent fail leaves notifyAgents seeing a stale crashCount and
-      // a wrong restartAttempted boolean. Surface via stderr (see dedup note).
-      process.stderr.write(`hook-crash-alert: crash-count write failed: ${(e as Error).message}\n`);
-    }
-  } else if (endType === 'daemon-crashed') {
-    // Read-only: surface today's count to chief/analyst without mutating it.
-    try {
-      const data = readFileSync(countFile, 'utf-8').trim();
-      const [date, count] = data.split(':');
-      crashCount = date === today ? parseInt(count, 10) : 0;
-    } catch {
-      crashCount = 0;
-    }
+  if (endType === 'crash' || endType === 'daemon-crashed') {
+    crashCount = readTodaysCrashCount(ctxRoot, agentName, today);
   }
 
   // Read last heartbeat for context
