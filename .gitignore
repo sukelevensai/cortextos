@@ -65,6 +65,7 @@ scripts/repair-session0-task-principal-admin.ps1
 scripts/register-restart-oneshot.ps1
 scripts/restart-daemon-oneshot-payload.ps1
 scripts/daemon-restart-result.json
+scripts/*.bak-*
 
 # Public community agent templates may intentionally include their own docs,
 # AGENTS.md, memory skill, and scaffold files.
