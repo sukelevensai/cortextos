@@ -111,6 +111,59 @@ export function writeDaemonCrashedMarkers(ctxRoot: string): void {
   }
 }
 
+/**
+ * Cross-session-safe liveness check for a candidate daemon PID, used by the
+ * single-instance boot guard in Daemon.start().
+ *
+ * `process.kill(pid, 0)` is NOT used on Windows — confirmed by prior testing
+ * that it returns EPERM cross-session even for a same-user process, which
+ * is indistinguishable from "dead" without a second signal and would either
+ * false-refuse startup (fleet stays down on a stale pidfile) or false-allow
+ * a dual-start depending on which way the error gets handled. This mirrors
+ * the same WMI/cross-session pitfall that broke
+ * scripts/restart-daemon-oneshot-payload.ps1's old CommandLine-based
+ * detection (see that file's header for the twin fix).
+ *
+ * `tasklist /FI "PID eq X"` works non-elevated across sessions and, without
+ * needing `/V`, already returns both the image name and session number in
+ * one CSV row — enough to reject a PID that was recycled by an unrelated
+ * process after the real daemon exited (image name != node.exe, or session
+ * != 0) instead of treating it as a live daemon.
+ */
+export function isLiveDaemonProcess(pid: number): boolean {
+  if (process.platform !== 'win32') {
+    // POSIX: process.kill(pid, 0) is a reliable liveness probe for
+    // same-user processes — the EPERM cross-session gotcha above is
+    // Windows-specific.
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+      encoding: 'utf-8',
+      timeout: 5000,
+    });
+    if (r.error || r.status !== 0) return false;
+    const out = (r.stdout || '').trim();
+    if (!out || /no tasks/i.test(out)) return false;
+    // CSV row shape: "ImageName","PID","SessionName","Session#","MemUsage"
+    const m = out.match(/^"([^"]*)","([^"]*)","([^"]*)","([^"]*)"/);
+    if (!m) return false;
+    const imageName = m[1].toLowerCase();
+    const sessionNum = m[4];
+    return imageName === 'node.exe' && sessionNum === '0';
+  } catch {
+    // Any probe failure must NOT be treated as "live" — that would
+    // false-refuse startup and leave the fleet down on a transient
+    // tasklist error. Unknown = treat as dead/stale (self-heal path).
+    return false;
+  }
+}
+
 export function getOperatorChatCreds(frameworkRoot: string): { chatId: string; botToken: string } | null {
   // Priority 1: explicit operator env (recommended for production).
   const envChat = process.env.CTX_OPERATOR_CHAT_ID;
@@ -290,6 +343,65 @@ class Daemon {
     // Write PID file
     const pidFile = join(this.ctxRoot, 'daemon.pid');
     ensureDir(this.ctxRoot);
+
+    // -------------------------------------------------------------------
+    // Single-instance guard (Fragility 2 item 4, wiki/_handoff/2026-07-02-
+    // cortextos-bulletproof-plan.md). CONSERVATIVE choice, made deliberately
+    // per that plan's open question: refuse to boot a second daemon when the
+    // existing daemon.pid resolves to a confirmed-live node.exe in Session 0
+    // (would otherwise silently double the whole fleet — the exhaustion
+    // class that near-crashed the machine); but if the pidfile is stale or
+    // dead (or missing), self-heal by taking it over rather than refusing —
+    // a false refusal on a recycled/dead PID would leave the fleet DOWN with
+    // no recovery, which is worse than the rare double-daemon this guard is
+    // meant to catch. See isLiveDaemonProcess() above for why
+    // process.kill(pid, 0) is not the liveness check.
+    // -------------------------------------------------------------------
+    if (existsSync(pidFile)) {
+      let oldPid = NaN;
+      try {
+        oldPid = Number.parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+      } catch { /* unreadable pidfile — treat as stale below */ }
+
+      if (Number.isFinite(oldPid) && oldPid > 0 && oldPid !== process.pid && isLiveDaemonProcess(oldPid)) {
+        const bannerLine = '='.repeat(78);
+        console.error(bannerLine);
+        console.error(
+          `[daemon] FATAL: another daemon instance is already running (pid ${oldPid}, ` +
+          `confirmed live node.exe in Session 0). Refusing dual-start to avoid ` +
+          `doubling the fleet.`,
+        );
+        console.error(bannerLine);
+        // Loud EXTERNAL marker — process.exit(1) alone is a quiet stop that a
+        // detached/Task-Scheduler-launched attempt could miss entirely.
+        try {
+          atomicWriteSync(
+            join(this.ctxRoot, '.daemon-dual-start-refused.json'),
+            JSON.stringify(
+              {
+                ts: new Date().toISOString(),
+                existingPid: oldPid,
+                attemptedPid: process.pid,
+                reason: 'daemon.pid resolves to a live node.exe process in Session 0',
+              },
+              null,
+              2,
+            ),
+          );
+        } catch (err) {
+          console.error('[daemon] Failed to write dual-start-refused marker (non-fatal):', err);
+        }
+        process.exit(1);
+      }
+
+      if (Number.isFinite(oldPid) && oldPid > 0) {
+        console.log(
+          `[daemon] Stale daemon.pid found (pid ${oldPid} is not a live node.exe in Session 0) — ` +
+          `taking over.`,
+        );
+      }
+    }
+
     writeFileSync(pidFile, String(process.pid), 'utf-8');
     if (process.platform !== 'win32') {
       try {
