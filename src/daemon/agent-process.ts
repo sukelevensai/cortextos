@@ -7,7 +7,7 @@ import { CodexAppServerPTY } from '../pty/codex-app-server-pty.js';
 import { HermesPTY, hermesDbExists } from '../pty/hermes-pty.js';
 import { MessageDedup, injectMessage } from '../pty/inject.js';
 import type { TelegramAPI } from '../telegram/api.js';
-import { ensureDir } from '../utils/atomic.js';
+import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 import { writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -74,7 +74,7 @@ export class AgentProcess {
     this.name = name;
     this.env = env;
     this.config = config;
-    if (config.max_crashes_per_day !== undefined) {
+    if (typeof config.max_crashes_per_day === 'number' && Number.isFinite(config.max_crashes_per_day)) {
       this.maxCrashesPerDay = config.max_crashes_per_day;
     }
     if (config.crash_window?.seconds) {
@@ -1023,14 +1023,23 @@ export class AgentProcess {
       if (existsSync(crashFile)) {
         const content = readFileSync(crashFile, 'utf-8').trim();
         const [storedDate, count] = content.split(':');
-        if (storedDate === today) {
-          this.crashCount = parseInt(count, 10) + 1;
-        } else {
+        const parsed = parseInt(count, 10);
+        if (storedDate === today && Number.isFinite(parsed) && parsed >= 0) {
+          this.crashCount = parsed + 1;
+        } else if (/^\d{4}-\d{2}-\d{2}$/.test(storedDate) && storedDate !== today) {
           this.crashCount = 1;
+        } else {
+          // Ledger garbled (torn write). This file is the only crash gate:
+          // a NaN here would disable both the daily cap (crashCount >=
+          // maxCrashesPerDay stays false) and backoff (setTimeout(NaN) fires
+          // immediately) for the rest of the day. Fail CLOSED at one-below-cap:
+          // this crash still restarts once at max backoff, the next one halts.
+          this.crashCount = Math.max(1, this.maxCrashesPerDay - 1);
+          this.log(`WARNING: corrupt ${crashFile} ("${content.slice(0, 80)}"); failing CLOSED - crash budget set to ${this.crashCount}/${this.maxCrashesPerDay}`);
         }
       }
       ensureDir(join(this.env.ctxRoot, 'logs', this.name));
-      writeFileSync(crashFile, `${today}:${this.crashCount}`, 'utf-8');
+      atomicWriteSync(crashFile, `${today}:${this.crashCount}`);
     } catch { /* ignore */ }
   }
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -308,5 +308,41 @@ describe('hook-loop-detector state loading', () => {
     const state = loadState(tmpDir);
     expect(state.history).toHaveLength(2);
     expect(state.history.map(r => r.toolName)).toEqual(['Read', 'Bash']);
+  });
+});
+
+describe('loadState/saveState corrupt-state handling (GAP-0156)', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'loop-detector-gap0156-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('corrupt state file starts fresh and logs loudly to stderr', () => {
+    writeFileSync(join(tmpDir, 'loop-detector.json'), '{"history":[trunc', 'utf-8');
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const state = loadState(tmpDir);
+      expect(state.history).toEqual([]);
+      expect(state.emergencyEscapeUsed).toBe(false);
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining('corrupt'));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('BOM-prefixed valid state file parses instead of resetting', () => {
+    writeFileSync(join(tmpDir, 'loop-detector.json'), '\uFEFF' + JSON.stringify({
+      history: [{ toolName: 'Read', argsHash: 'abc', ts: 1000 }],
+      firstBlockedAt: null,
+      emergencyEscapeUsed: true,
+    }), 'utf-8');
+    const state = loadState(tmpDir);
+    expect(state.history).toHaveLength(1);
+    expect(state.emergencyEscapeUsed).toBe(true);
   });
 });

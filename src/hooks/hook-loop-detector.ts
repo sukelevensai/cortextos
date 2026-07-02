@@ -22,7 +22,9 @@
  * State: {ctxRoot}/state/{agentName}/loop-detector.json
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
+import { atomicWriteSync } from '../utils/atomic.js';
+import { stripBom } from '../utils/strip-bom.js';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
@@ -83,7 +85,7 @@ export function loadState(stateDir: string): LoopDetectorState {
   const p = statePath(stateDir);
   if (!existsSync(p)) return { history: [], firstBlockedAt: null, emergencyEscapeUsed: false };
   try {
-    const parsed = JSON.parse(readFileSync(p, 'utf-8')) as Partial<LoopDetectorState>;
+    const parsed = JSON.parse(stripBom(readFileSync(p, 'utf-8'))) as Partial<LoopDetectorState>;
     const rawHistory = Array.isArray(parsed.history) ? parsed.history : [];
     const history: ToolCallRecord[] = rawHistory.filter(
       (r): r is ToolCallRecord =>
@@ -98,15 +100,22 @@ export function loadState(stateDir: string): LoopDetectorState {
     const emergencyEscapeUsed =
       typeof parsed.emergencyEscapeUsed === 'boolean' ? parsed.emergencyEscapeUsed : false;
     return { history, firstBlockedAt, emergencyEscapeUsed };
-  } catch {
+  } catch (err) {
+    // Corrupt state resets the loop counters AND re-arms the one-shot
+    // emergency escape (fail-open). The prior state is unrecoverable, so
+    // start fresh - but say so loudly instead of masking it.
+    process.stderr.write(
+      `hook-loop-detector: corrupt ${p} (${err instanceof Error ? err.message : String(err)}); starting fresh - loop history and emergency-escape state lost\n`,
+    );
     return { history: [], firstBlockedAt: null, emergencyEscapeUsed: false };
   }
 }
 
 function saveState(stateDir: string, state: LoopDetectorState): void {
   try {
-    mkdirSync(stateDir, { recursive: true });
-    writeFileSync(statePath(stateDir), JSON.stringify(state, null, 2) + '\n', 'utf-8');
+    // Atomic write: this fires on every tool call, so a raw writeFileSync
+    // torn mid-write is a routine way to corrupt the state file.
+    atomicWriteSync(statePath(stateDir), JSON.stringify(state, null, 2));
   } catch {
     // Best-effort; never break a hook.
   }
