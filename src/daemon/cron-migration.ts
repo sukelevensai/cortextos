@@ -341,15 +341,43 @@ function runMigrationCore(
     return { agentName, status: 'no-crons' };
   }
 
-  // Extract crons array — treat missing / empty as "no crons"
+  // Extract crons array — treat missing / empty as "no crons".
+  // Accept three value shapes (previously any non-array fell through to the
+  // "no crons" path, which wrote an empty crons.json + marker = permanent
+  // silent cron loss):
+  //   1. canonical array
+  //   2. a single bare cron object — wrapped as a one-element array
+  //   3. a name-keyed map of cron objects — entries become { name, ...def }
+  // Any other object shape is unrecognized: warn and return WITHOUT writing
+  // crons.json or the marker, so a corrected config.json still migrates on a
+  // later boot instead of the crons being lost forever.
   const configCrons: CronEntry[] = [];
-  if (
-    rawConfig !== null &&
-    typeof rawConfig === 'object' &&
-    'crons' in rawConfig &&
-    Array.isArray((rawConfig as { crons?: unknown }).crons)
-  ) {
-    configCrons.push(...((rawConfig as { crons: CronEntry[] }).crons));
+  if (rawConfig !== null && typeof rawConfig === 'object' && 'crons' in rawConfig) {
+    const rawCrons = (rawConfig as { crons?: unknown }).crons;
+    if (Array.isArray(rawCrons)) {
+      configCrons.push(...(rawCrons as CronEntry[]));
+    } else if (rawCrons !== null && typeof rawCrons === 'object') {
+      const record = rawCrons as Record<string, unknown>;
+      const values = Object.values(record);
+      if (typeof record.name === 'string' || typeof record.prompt === 'string') {
+        log(`WARNING: crons for "${agentName}" is a single cron object, expected an array — wrapping it`);
+        configCrons.push(record as unknown as CronEntry);
+      } else if (
+        values.length > 0 &&
+        values.every((v) => v !== null && typeof v === 'object' && !Array.isArray(v))
+      ) {
+        log(`WARNING: crons for "${agentName}" is a name-keyed map, expected an array — converting entries`);
+        for (const [name, def] of Object.entries(record)) {
+          configCrons.push({ name, ...(def as object) } as CronEntry);
+        }
+      } else {
+        log(
+          `ERROR: crons for "${agentName}" has unrecognized shape (expected array) — ` +
+            `leaving unmigrated so a corrected config.json can retry on next boot`,
+        );
+        return { agentName, status: 'no-crons' };
+      }
+    }
   }
 
   if (configCrons.length === 0) {
