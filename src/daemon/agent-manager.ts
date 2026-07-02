@@ -17,6 +17,7 @@ import { collectTelegramCommands, registerTelegramCommands } from '../bus/metric
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { stripBom } from '../utils/strip-bom.js';
+import { isValidBotToken } from '../utils/telegram-token.js';
 
 type LogFn = (msg: string) => void;
 
@@ -339,7 +340,7 @@ export class AgentManager {
       allowedUserId = allowedUserMatch?.[1]?.trim() || undefined;
 
       // Validate BOT_TOKEN format: must be numeric_id:alphanumeric_secret
-      if (botToken && !/^\d+:[A-Za-z0-9_-]+$/.test(botToken)) {
+      if (botToken && !isValidBotToken(botToken)) {
         log(`WARNING: BOT_TOKEN format invalid (expected: 123456:ABC...). Telegram will not start.`);
         botToken = undefined;
       }
@@ -792,6 +793,15 @@ export class AgentManager {
 
     if (!activityBotToken || !activityChatId) {
       log('Activity-channel env present but missing BOT_TOKEN or CHAT_ID — skipping poller');
+      return;
+    }
+
+    // Fragility 6: this path previously had ZERO shape validation — a
+    // placeholder-shaped ACTIVITY_BOT_TOKEN (stub, truncated paste, literal
+    // "PASTE_TOKEN_HERE") would sail straight into TelegramAPI and start a
+    // poller that 401-spams Telegram's getUpdates endpoint forever.
+    if (!isValidBotToken(activityBotToken)) {
+      log('WARNING: ACTIVITY_BOT_TOKEN format invalid (expected: 123456:ABC...). Activity-channel poller will not start.');
       return;
     }
 

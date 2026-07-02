@@ -4,7 +4,8 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 
 import { spawnSync } from 'child_process';
 import { join } from 'path';
 import { homedir } from 'os';
-import { ensureDir } from '../utils/atomic.js';
+import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
+import { isValidBotToken } from '../utils/telegram-token.js';
 
 // Each fast-checker registers a process-level SIGUSR1 handler (see
 // fast-checker.ts:102). With >10 active agents the default Node listener cap
@@ -114,7 +115,7 @@ export function getOperatorChatCreds(frameworkRoot: string): { chatId: string; b
   // Priority 1: explicit operator env (recommended for production).
   const envChat = process.env.CTX_OPERATOR_CHAT_ID;
   const envToken = process.env.CTX_OPERATOR_BOT_TOKEN;
-  if (envChat && envToken && /^\d+:[A-Za-z0-9_-]+$/.test(envToken)) {
+  if (envChat && envToken && isValidBotToken(envToken)) {
     return { chatId: envChat, botToken: envToken };
   }
   // Priority 2: fall back to the first agent's .env. Good enough for
@@ -157,7 +158,7 @@ export function getOperatorChatCreds(frameworkRoot: string): { chatId: string; b
           }
           const botToken = tokenMatch[1].trim();
           const chatId = envChat || chatMatch[1].trim();
-          if (/^\d+:[A-Za-z0-9_-]+$/.test(botToken)) {
+          if (isValidBotToken(botToken)) {
             return { chatId, botToken };
           }
           console.error(
@@ -294,6 +295,60 @@ class Daemon {
       try {
         chmodSync(pidFile, 0o600);
       } catch { /* best effort */ }
+    }
+
+    // Register this daemon as a resident-fleet root PID. Fragility 1
+    // (Layer 2, AIAgency/scripts/lib/process-tree-guard.ps1) reads this
+    // file to determine which process trees are OFF-LIMITS to cross-lane
+    // kill helpers (LeadOps cleanup scripts, ad-hoc reapers, etc.) — see
+    // AIAgency/wiki/concepts/elevated-helper-contract.md and
+    // AIAgency/wiki/_handoff/2026-07-02-cortextos-bulletproof-plan.md
+    // (Fragility 1) for the full incident + design record.
+    //
+    // Read-modify-write, NEVER a blind overwrite: other lanes (LeadOps,
+    // interactive terminals, etc.) are expected to add their own top-level
+    // entries to this same file later, and clobbering it on every daemon
+    // boot would silently un-protect them. Best-effort only — a registry
+    // write failure must never block daemon boot; the daemon's own
+    // liveness matters far more than this file existing.
+    try {
+      const registryDir = join(homedir(), '.cortextos', 'registry');
+      const registryPath = join(registryDir, 'resident-roots.json');
+      ensureDir(registryDir);
+
+      let registry: Record<string, unknown> = {};
+      if (existsSync(registryPath)) {
+        try {
+          const parsed: unknown = JSON.parse(readFileSync(registryPath, 'utf-8'));
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            registry = parsed as Record<string, unknown>;
+          }
+          // A parseable-but-wrong-shape file (array, string, number, ...)
+          // falls through to the empty-object default above rather than
+          // aborting — same "never block boot" rule as a read/parse failure.
+        } catch {
+          // Corrupt/unreadable existing registry: per the no-wipe rule this
+          // is NOT a reason to abort boot, but it IS a reason to stop trying
+          // to preserve whatever was there — write a fresh daemon-only
+          // object instead of propagating the corruption.
+          registry = {};
+        }
+      }
+
+      registry['cortextos-daemon'] = {
+        rootPid: process.pid,
+        // This daemon only ever runs under the cortextos-daemon-session0
+        // Scheduled Task (S4U, RunLevel Limited — confirmed in
+        // AIAgency/scripts/health-probe.ps1's header comments), so Session 0
+        // is a fixed fact of how this process is launched, not something
+        // queried at runtime.
+        sessionId: 0,
+        declaredAt: new Date().toISOString(),
+      };
+
+      atomicWriteSync(registryPath, JSON.stringify(registry, null, 2));
+    } catch (err) {
+      console.error('[daemon] Resident-fleet registry write failed (non-fatal):', err);
     }
 
     // Create agent manager

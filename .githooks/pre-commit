@@ -1,0 +1,57 @@
+#!/bin/bash
+# .githooks/pre-commit — cortextos
+#
+# Currently a single check: Layer K, the unsafe process-kill pattern lint
+# (Fragility 1 / Layer 3, ported from AIAgency's pre-commit hook after the
+# 2026-07-01/02 crash incidents). Full ban-list rationale lives in the
+# AIAgency repo: wiki/concepts/elevated-helper-contract.md
+#
+# This hook only takes effect once core.hooksPath is set to point at
+# .githooks in this repo (not done by this commit — see the seam note in
+# AIAgency wiki/concepts/elevated-helper-contract.md and the caller's
+# handoff notes for why that activation step is deliberately separate).
+#
+# NOT AN OVERRIDE ENV VAR ON PURPOSE: the lint itself already fails open
+# on any of its own errors (missing python3, missing script, internal
+# crash) -- see scripts/lint-unsafe-kills.sh's own contract. A confirmed
+# match is a real safety finding, not a false-positive-prone check that
+# needs a bypass knob; use `git commit --no-verify` if a genuine
+# emergency override is ever needed (this hook has no other checks to
+# skip today).
+
+# ─────────────────────────────────────────────────────────────────────
+# Layer K — unsafe process-kill pattern lint (Fragility 1 Layer 3)
+# Scans staged *.ps1 files for the machine-wide process-kill patterns
+# that caused the 2026-07-01/02 crash incidents.
+#
+# FAIL-OPEN CONTRACT: scripts/lint-unsafe-kills.sh guarantees its own
+# exit code is 0 (clean/skipped) unless it found a CONFIRMED pattern
+# match, in which case it is exactly 1. This hook trusts that contract
+# and treats ANY OTHER exit code (missing file, syntax error, crash,
+# permissions issue) as fail-open too — a broken lint must never wedge
+# the operator's ability to commit.
+# ─────────────────────────────────────────────────────────────────────
+if [ -f scripts/lint-unsafe-kills.sh ]; then
+  LINT_OUT=$(bash scripts/lint-unsafe-kills.sh 2>&1)
+  LINT_EXIT=$?
+  if [ "$LINT_EXIT" -eq 1 ]; then
+    echo "" >&2
+    echo "=========================================================" >&2
+    echo "[pre-commit Layer K] BLOCKED: unsafe process-kill pattern detected" >&2
+    echo "=========================================================" >&2
+    printf '%s\n' "$LINT_OUT" >&2
+    echo "" >&2
+    echo "See AIAgency wiki/concepts/elevated-helper-contract.md section 2 for the ban list." >&2
+    echo "This is a real safety finding, not a false-positive escape hatch — fix" >&2
+    echo "the script rather than bypassing with --no-verify." >&2
+    echo "=========================================================" >&2
+    exit 1
+  elif [ "$LINT_EXIT" -ne 0 ]; then
+    echo "[pre-commit Layer K] lint-unsafe-kills.sh exited $LINT_EXIT (unexpected) — failing OPEN, not blocking." >&2
+    printf '%s\n' "$LINT_OUT" >&2
+  fi
+else
+  echo "[pre-commit Layer K] scripts/lint-unsafe-kills.sh not found — skipping (fail-open)." >&2
+fi
+
+exit 0
