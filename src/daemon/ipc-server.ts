@@ -9,6 +9,7 @@ import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
 import { parseDurationMs } from '../bus/cron-state.js';
 import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
+import { stripBom } from '../utils/strip-bom.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
 
@@ -302,21 +303,32 @@ export function isValidSchedule(schedule: string): boolean {
 
 /**
  * Read the list of enabled agent names from enabled-agents.json.
+ *
+ * Discriminates the three read outcomes so callers can tell "no registry yet"
+ * (bootstrap, safe to be permissive) from "registry is corrupt" (must NOT be
+ * treated as an empty allow-list — see GAP-0158). BOM is stripped so a
+ * BOM-prefixed but otherwise valid registry parses as 'ok', not 'unreadable'.
  */
-function getEnabledAgents(): string[] {
+type EnabledAgentsResult =
+  | { status: 'ok'; agents: string[] }
+  | { status: 'missing' }
+  | { status: 'unreadable' };
+
+function getEnabledAgents(): EnabledAgentsResult {
   const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
   const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
-  if (!existsSync(enabledFile)) return [];
+  if (!existsSync(enabledFile)) return { status: 'missing' };
   try {
-    const data = JSON.parse(readFileSync(enabledFile, 'utf-8')) as Record<
+    const data = JSON.parse(stripBom(readFileSync(enabledFile, 'utf-8'))) as Record<
       string,
       { enabled?: boolean }
     >;
-    return Object.entries(data)
+    const agents = Object.entries(data)
       .filter(([, v]) => v.enabled !== false)
       .map(([k]) => k);
+    return { status: 'ok', agents };
   } catch {
-    return [];
+    return { status: 'unreadable' };
   }
 }
 
@@ -341,11 +353,23 @@ export function handleAddCron(
   if (!agent || !agent.trim()) {
     return { ok: false, error: 'Agent name is required.', field: 'agent' };
   }
-  const enabledAgents = getEnabledAgents();
-  if (enabledAgents.length > 0 && !enabledAgents.includes(agent)) {
+  // Agent-existence gate. A corrupt/unreadable enabled-agents.json must fail
+  // CLOSED here (GAP-0158): the old code read it as an empty list and, via a
+  // `length > 0` short-circuit, accepted ANY agent name — writing a cron the
+  // scheduler (which only walks enabled-agents.json) never fires. A genuinely
+  // missing registry (bootstrap) or an empty enabled list stays permissive.
+  const enabled = getEnabledAgents();
+  if (enabled.status === 'unreadable') {
     return {
       ok: false,
-      error: `Agent '${agent}' not found. Enabled agents: ${enabledAgents.join(', ')}`,
+      error: 'Cannot validate agent: enabled-agents.json is unreadable/corrupt. Fix the registry before adding crons.',
+      field: 'agent',
+    };
+  }
+  if (enabled.status === 'ok' && enabled.agents.length > 0 && !enabled.agents.includes(agent)) {
+    return {
+      ok: false,
+      error: `Agent '${agent}' not found. Enabled agents: ${enabled.agents.join(', ')}`,
       field: 'agent',
     };
   }

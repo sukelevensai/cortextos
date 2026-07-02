@@ -214,6 +214,38 @@ describe('handleAddCron — validation failures', () => {
     expect(result.error).toContain('paul'); // lists enabled agents
   });
 
+  it('GAP-0158: fails CLOSED (rejects) when enabled-agents.json is corrupt/unreadable', async () => {
+    // A torn/garbled registry must NOT be read as an empty allow-list that
+    // accepts any agent and writes an orphaned cron.
+    const configDir = join(tmpRoot, 'config');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'enabled-agents.json'), '{"boris": {trunc');
+    const { handleAddCron } = await import('../../../src/daemon/ipc-server.js');
+    const result = handleAddCron('boris', { name: 'test', prompt: 'x', schedule: '1h' });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('agent');
+    expect(result.error).toContain('unreadable');
+  });
+
+  it('GAP-0158: a BOM-prefixed but valid registry still validates (agent present -> ok)', async () => {
+    const configDir = join(tmpRoot, 'config');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'enabled-agents.json'), '\uFEFF' + JSON.stringify({ boris: { enabled: true } }));
+    const { handleAddCron } = await import('../../../src/daemon/ipc-server.js');
+    const ok = handleAddCron('boris', { name: 'test', prompt: 'x', schedule: '1h' });
+    expect(ok.ok).toBe(true);
+    const bad = handleAddCron('ghost', { name: 'test2', prompt: 'x', schedule: '1h' });
+    expect(bad.ok).toBe(false);
+    expect(bad.error).toContain('ghost');
+  });
+
+  it('GAP-0158: missing registry (bootstrap) stays permissive', async () => {
+    // No enabled-agents.json written at all.
+    const { handleAddCron } = await import('../../../src/daemon/ipc-server.js');
+    const result = handleAddCron('anyagent', { name: 'test', prompt: 'x', schedule: '1h' });
+    expect(result.ok).toBe(true);
+  });
+
   it('rejects missing definition', async () => {
     writeEnabledAgents({ boris: { enabled: true } });
     const { handleAddCron } = await import('../../../src/daemon/ipc-server.js');
