@@ -211,7 +211,7 @@ export class AgentPTY {
     for (const ext of ['.exe', '.cmd']) {
       for (const dir of pathDirs) {
         if (existsSync(join(dir, `claude${ext}`))) {
-          return `claude${ext}`;
+          return join(dir, `claude${ext}`);
         }
       }
     }
