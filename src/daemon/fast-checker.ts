@@ -10,6 +10,8 @@ import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
 import { stripControlChars, sanitizeForPtyInjection, wrapFenceSafe } from '../utils/validate.js';
+import { atomicWriteSync } from '../utils/atomic.js';
+import { stripBom } from '../utils/strip-bom.js';
 
 type LogFn = (msg: string) => void;
 type TelegramSafeLink = {
@@ -1309,11 +1311,21 @@ For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, 
   private loadCtxCircuit(): void {
     try {
       if (!existsSync(this.ctxCircuitFile)) return;
-      const data = JSON.parse(readFileSync(this.ctxCircuitFile, 'utf-8'));
+      const data = JSON.parse(stripBom(readFileSync(this.ctxCircuitFile, 'utf-8')));
+      if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('ctx-circuit state is not an object');
+      }
       this.ctxCircuitRestarts = Array.isArray(data.restarts) ? data.restarts : [];
       this.ctxCircuitBrokenAt = typeof data.brokenAt === 'number' ? data.brokenAt : null;
-    } catch {
-      // Start fresh on error
+    } catch (err) {
+      // The file existed but could not be read/parsed. Failing open would
+      // silently un-trip the breaker exactly when it is most needed (corrupt
+      // writes cluster in restart/crash storms), so fail CLOSED: pause
+      // auto-restarts now and let the normal 30min reset path clear it.
+      this.ctxCircuitRestarts = [];
+      this.ctxCircuitBrokenAt = Date.now();
+      this.log(`WARNING: corrupt ${this.ctxCircuitFile} (${err instanceof Error ? err.message : String(err)}); failing CLOSED - context auto-restarts paused 30min`);
+      this.saveCtxCircuit();
     }
   }
 
@@ -1322,10 +1334,10 @@ For multiline, bullets, or long replies: write full reply to a temp UTF-8 file, 
    */
   private saveCtxCircuit(): void {
     try {
-      writeFileSync(this.ctxCircuitFile, JSON.stringify({
+      atomicWriteSync(this.ctxCircuitFile, JSON.stringify({
         restarts: this.ctxCircuitRestarts,
         brokenAt: this.ctxCircuitBrokenAt,
-      }), 'utf-8');
+      }));
     } catch {
       // Non-critical
     }
