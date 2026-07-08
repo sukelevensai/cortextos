@@ -4,8 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:local": "next dev -H 127.0.0.1",
     "build": "next build",
     "start": "next start",
+    "start:local": "next start -H 127.0.0.1",
     "lint": "eslint",
     "test": "vitest run --root .. dashboard/src",
     "test:codex": "vitest run --root .. dashboard/src/lib/__tests__/cost-parser-codex.test.ts"

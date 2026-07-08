@@ -18,6 +18,7 @@ import { getAllAgents } from '@/lib/config';
 import { computeNextFire } from '@/lib/cron-utils';
 import { readAgentCrons, readLastExecution, type CronSummaryRow } from '@/lib/data/crons';
 import { IPCClient } from '@/lib/ipc-client';
+import { requireAdmin } from '@/lib/authz';
 
 export const dynamic = 'force-dynamic';
 
@@ -74,6 +75,10 @@ export async function GET(request: NextRequest) {
 // ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest) {
+  // GAP-0078: creating a cron is fleet-critical - admin only
+  const authz = await requireAdmin(request);
+  if ('response' in authz) return authz.response;
+
   let body: unknown;
   try {
     body = await request.json();

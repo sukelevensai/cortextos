@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { CTX_ROOT } from '@/lib/config';
+import { requireAdmin } from '@/lib/authz';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,6 +39,10 @@ export async function GET(_request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
+  // GAP-0175: system config mutation is admin-only (authZ sibling of GAP-0074)
+  const authz = await requireAdmin(request);
+  if ('response' in authz) return authz.response;
+
   try {
     const body = await request.json();
     const current = readConfig();

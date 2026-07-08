@@ -32,7 +32,7 @@ function readAllowedRoots(): string[] {
   }
 }
 
-function isPathUnderAnyRoot(realPath: string, roots: string[]): boolean {
+function matchingRoot(realPath: string, roots: string[]): string | null {
   for (const root of roots) {
     let realRoot: string;
     try {
@@ -40,11 +40,11 @@ function isPathUnderAnyRoot(realPath: string, roots: string[]): boolean {
     } catch {
       continue;
     }
-    if (realPath === realRoot) return true;
+    if (realPath === realRoot) return realRoot;
     const rootWithSep = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
-    if (realPath.startsWith(rootWithSep)) return true;
+    if (realPath.startsWith(rootWithSep)) return realRoot;
   }
-  return false;
+  return null;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -111,12 +111,15 @@ export async function GET(
   // Both passes enforce the same security check: the resolved real path
   // must fall within a configured allowed root.
   let realFullPath: string | null = null;
+  let matchedRoot: string | null = null;
 
   function tryResolve(candidate: string): boolean {
     try {
       const real = fs.realpathSync(candidate);
-      if (isPathUnderAnyRoot(real, validRoots)) {
+      const root = matchingRoot(real, validRoots);
+      if (root) {
         realFullPath = real;
+        matchedRoot = root;
         return true;
       }
     } catch {
@@ -149,7 +152,7 @@ export async function GET(
     }
   }
 
-  if (!realFullPath) {
+  if (!realFullPath || !matchedRoot) {
     // Suggest which directory to add based on the first root candidate tried
     const suggestedDir = path.dirname(path.resolve(ctxRoot, relativePath)).replace(/\\/g, '/');
     return new Response(
@@ -159,6 +162,18 @@ export async function GET(
         configured_roots: validRoots,
       }),
       { status: 404, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
+  // GAP-0009 (.env exposure): never serve dotfiles or files inside
+  // dot-directories. Checked on the segments BELOW the matched root because
+  // roots themselves may legitimately contain dot segments (~/.cortextos).
+  // Covers .env, .env.local, .git, .claude, .ssh, .cortextos-env, etc.
+  const relUnderRoot = path.relative(matchedRoot, realFullPath);
+  if (relUnderRoot.split(path.sep).some((seg) => seg.startsWith('.'))) {
+    return Response.json(
+      { error: 'forbidden', message: 'Hidden files and dot-directories are not servable via the media API.' },
+      { status: 403 },
     );
   }
 

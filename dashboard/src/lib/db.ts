@@ -121,6 +121,7 @@ function initializeSchema(db: Database.Database): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'member',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -174,6 +175,16 @@ function initializeSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_messages_org ON messages(org);
     CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
   `);
+
+  // GAP-0074/0078: role column for handler-level authZ. Databases created
+  // before the column get it via ALTER with DEFAULT 'admin' so existing
+  // operators keep full access. Fresh databases (CREATE TABLE above) default
+  // to 'member' so an insert path that forgets to set role can never mint an
+  // admin; the seed path and settings API always set role explicitly.
+  const userColumns = db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  if (!userColumns.some((c) => c.name === 'role')) {
+    db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
+  }
 }
 
 // globalThis singleton survives Next.js hot reload

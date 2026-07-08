@@ -10,6 +10,7 @@
 
 import { NextRequest } from 'next/server';
 import { IPCClient } from '@/lib/ipc-client';
+import { requireAdmin } from '@/lib/authz';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,6 +26,10 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: RouteParams },
 ) {
+  // GAP-0078: cron mutation is fleet-critical — admin only
+  const authz = await requireAdmin(request);
+  if ('response' in authz) return authz.response;
+
   const { agent, name } = await params;
   const decodedAgent = decodeURIComponent(agent);
   const decodedName = decodeURIComponent(name);
@@ -85,9 +90,13 @@ export async function PATCH(
 // ---------------------------------------------------------------------------
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: RouteParams },
 ) {
+  // GAP-0078: cron mutation is fleet-critical — admin only
+  const authz = await requireAdmin(request);
+  if ('response' in authz) return authz.response;
+
   const { agent, name } = await params;
   const decodedAgent = decodeURIComponent(agent);
   const decodedName = decodeURIComponent(name);

@@ -31,12 +31,32 @@ vi.mock('@/lib/ipc-client', () => {
   return { IPCClient };
 });
 
+// Mock authz (GAP-0078): the real module chains to next-auth, which vitest
+// cannot resolve outside a Next.js runtime. Default: allow as admin so the
+// input-validation and IPC tests below exercise their own concerns; the
+// authZ-denial test overrides per-call.
+type AuthzResult =
+  | { user: { id: number; username: string; role: string } }
+  | { response: Response };
+
+const mockRequireAdmin = vi.fn<(req?: unknown) => Promise<AuthzResult>>(async () => ({
+  user: { id: 1, username: 'admin', role: 'admin' },
+}));
+
+vi.mock('@/lib/authz', () => ({
+  requireAdmin: (req?: unknown) => mockRequireAdmin(req),
+}));
+
 // Import route AFTER mock registration
 type FireRouteModule = typeof import('../[agent]/[name]/fire/route');
 let route: FireRouteModule;
 
 beforeEach(async () => {
   mockSend.mockReset();
+  mockRequireAdmin.mockClear();
+  mockRequireAdmin.mockImplementation(async () => ({
+    user: { id: 1, username: 'admin', role: 'admin' },
+  }));
   route = await import('../[agent]/[name]/fire/route');
 });
 
@@ -223,5 +243,21 @@ describe('POST fire route — 400 invalid input', () => {
     mockSend.mockResolvedValueOnce({ success: true, data: { ok: true, firedAt: 1 } });
     const res = await callPost('my-agent', 'my-cron-name');
     expect(res.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AuthZ — non-admin is rejected before any IPC call (GAP-0078)
+// ---------------------------------------------------------------------------
+
+describe('POST fire route — authZ', () => {
+  it('returns the requireAdmin denial response and never calls IPC', async () => {
+    mockRequireAdmin.mockImplementationOnce(async () => ({
+      response: Response.json({ error: 'Forbidden: admin role required' }, { status: 403 }),
+    }));
+
+    const res = await callPost('boris', 'heartbeat');
+    expect(res.status).toBe(403);
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });

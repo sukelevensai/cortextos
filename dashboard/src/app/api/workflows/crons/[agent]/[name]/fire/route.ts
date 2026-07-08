@@ -20,6 +20,7 @@
 
 import { NextRequest } from 'next/server';
 import { IPCClient } from '@/lib/ipc-client';
+import { requireAdmin } from '@/lib/authz';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,9 +29,13 @@ const VALID_IDENT = /^[a-zA-Z0-9_-]+$/;
 type RouteParams = Promise<{ agent: string; name: string }>;
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: RouteParams },
 ) {
+  // GAP-0078: manual cron fire is fleet-critical — admin only
+  const authz = await requireAdmin(request);
+  if ('response' in authz) return authz.response;
+
   const { agent, name } = await params;
   const decodedAgent = decodeURIComponent(agent);
   const decodedName = decodeURIComponent(name);

@@ -160,7 +160,7 @@ export async function seedAdminUser(): Promise<void> {
   }
 
   const hash = await bcrypt.hash(password, 12);
-  db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run(
+  db.prepare("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')").run(
     username,
     hash
   );
