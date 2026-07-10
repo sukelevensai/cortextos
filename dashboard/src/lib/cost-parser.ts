@@ -290,7 +290,9 @@ const INSERT_COST = db.prepare(`
 `);
 
 /**
- * Persist cost entries to SQLite. Skips duplicates via INSERT OR IGNORE.
+ * Persist cost entries to SQLite. Duplicates are dropped by INSERT OR IGNORE
+ * against the UNIQUE index idx_cost_entries_natural (db.ts, GAP-0178); without
+ * that index OR IGNORE is a no-op because id is the only key.
  */
 export function persistCostEntries(entries: CostEntry[]): number {
   let inserted = 0;
@@ -331,7 +333,7 @@ export function syncCosts(): { scanned: number; inserted: number } {
   const seen = new Set<string>();
   const merged: CostEntry[] = [];
   for (const entry of [...claudeEntries, ...codexEntries]) {
-    const key = `${entry.source_file ?? ''}|${entry.timestamp}|${entry.model}|${entry.agent}`;
+    const key = `${entry.source_file ?? ''}|${entry.timestamp}|${entry.model}|${entry.agent}|${entry.org}`;
     if (seen.has(key)) continue;
     seen.add(key);
     merged.push(entry);

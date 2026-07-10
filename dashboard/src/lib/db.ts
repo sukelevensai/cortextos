@@ -185,6 +185,31 @@ function initializeSchema(db: Database.Database): void {
   if (!userColumns.some((c) => c.name === 'role')) {
     db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
   }
+
+  // GAP-0178: cost_entries dedup. The INSERT OR IGNORE in cost-parser.ts was a
+  // silent no-op because cost_entries had no UNIQUE constraint on its natural
+  // key (only an AUTOINCREMENT id), so every 5-min Analytics rescan re-inserted
+  // every row -> unbounded duplicates -> inflated spend aggregates. Add a UNIQUE
+  // index on the natural key so OR IGNORE actually dedups. Existing dup rows must
+  // be removed BEFORE the index is created (a naive CREATE UNIQUE INDEX throws on
+  // pre-existing dups); keep the lowest id per group - every row in a rescan
+  // dup-group carries an identical payload, so this is lossless. The COALESCE
+  // wrapper collapses NULL source_file rows, which SQLite would otherwise treat
+  // as distinct in a UNIQUE index. Gated on index-absence so the dedup runs once.
+  const costNaturalIdx = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_cost_entries_natural'")
+    .get();
+  if (!costNaturalIdx) {
+    db.exec(`
+      DELETE FROM cost_entries
+      WHERE id NOT IN (
+        SELECT MIN(id) FROM cost_entries
+        GROUP BY timestamp, agent, org, model, COALESCE(source_file, '')
+      );
+      CREATE UNIQUE INDEX idx_cost_entries_natural
+        ON cost_entries(timestamp, agent, org, model, COALESCE(source_file, ''));
+    `);
+  }
 }
 
 // globalThis singleton survives Next.js hot reload
