@@ -19,7 +19,7 @@ interface ModelPricing {
 }
 
 const MODEL_PRICING: Record<string, ModelPricing> = {
-  opus: { inputPerMillion: 15, outputPerMillion: 75, cacheWritePerMillion: 3.75, cacheReadPerMillion: 1.50 },
+  opus: { inputPerMillion: 15, outputPerMillion: 75, cacheWritePerMillion: 18.75, cacheReadPerMillion: 1.50 },
   sonnet: { inputPerMillion: 3, outputPerMillion: 15, cacheWritePerMillion: 3.75, cacheReadPerMillion: 0.30 },
   haiku: { inputPerMillion: 0.8, outputPerMillion: 4, cacheWritePerMillion: 1.00, cacheReadPerMillion: 0.08 },
   // gpt-5-codex: OpenAI list pricing as of 2026-01. cache write n/a (no separate
