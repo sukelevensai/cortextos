@@ -231,9 +231,25 @@ describe('E2E Lifecycle', () => {
       const files = readdirSync(inboxDir).filter(f => f.endsWith('.json'));
       const msg = JSON.parse(readFileSync(join(inboxDir, files[0]), 'utf-8'));
 
-      // Verify exact field set matches bash send-message.sh
-      const expectedFields = ['id', 'from', 'to', 'priority', 'timestamp', 'text', 'reply_to'];
-      expect(Object.keys(msg).sort()).toEqual(expectedFields.sort());
+      // Required field set, originally mirrored from bash send-message.sh. That script
+      // is now a thin wrapper around dist/cli.js (see bus/send-message.sh) rather than
+      // an independent implementation, so there is no second writer to stay
+      // byte-identical with. The assertion therefore guards the two things that still
+      // matter: no required field may disappear, and no UNEXPECTED field may appear.
+      // Known-optional additive fields are listed explicitly so a genuinely stray field
+      // still fails this test.
+      const requiredFields = ['id', 'from', 'to', 'priority', 'timestamp', 'text', 'reply_to'];
+      const optionalFields = [
+        'sig',          // H10 HMAC signing
+        'thread_root',  // storm guard (2026-08-06 usage spike)
+        'depth',        // storm guard
+        'no_reply',     // storm guard: suppress the reply footer on FYI messages
+      ];
+      const actual = Object.keys(msg).sort();
+      for (const f of requiredFields) {
+        expect(actual).toContain(f);
+      }
+      expect(actual.filter(f => !requiredFields.includes(f) && !optionalFields.includes(f))).toEqual([]);
 
       // Verify field types
       expect(typeof msg.id).toBe('string');

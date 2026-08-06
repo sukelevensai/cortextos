@@ -4,6 +4,7 @@ import { createHash } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
+import { checkSendAllowed, StormGuardError } from '../bus/storm-guard.js';
 import { validateAgentName, validateTaskId } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
@@ -133,7 +134,8 @@ busCommand
   .argument('<text>', 'Message text')
   .argument('[reply-to]', 'Reply to message ID (optional positional form)')
   .option('--reply-to <id>', 'Reply to message ID')
-  .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string }) => {
+  .option('--no-reply', 'FYI only: suppress the "Reply using:" footer on delivery so the recipient is not prompted to respond')
+  .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string; noReply?: boolean }) => {
     // Accept reply-to as either positional arg or --reply-to flag (P2 fix #9)
     const effectiveReplyTo = opts.replyTo ?? replyToArg;
     const validPriorities: Priority[] = ['urgent', 'high', 'normal', 'low'];
@@ -173,7 +175,24 @@ busCommand
       console.error(`Warning: agent '${to}' not found in project. Message will be queued but may never be read.`);
     }
 
-    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo);
+    let msgId: string;
+    try {
+      msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo, {
+        noReply: opts.noReply,
+      });
+    } catch (err) {
+      // A storm-guard refusal is an expected outcome, not a crash. Print the reason so
+      // the agent reads it in the same turn it tried to send, and exit non-zero.
+      if (err instanceof StormGuardError) {
+        console.error(`REFUSED: ${err.message}`);
+        try {
+          logEvent(paths, env.agentName, env.org, 'message', 'agent_message_refused', 'warning',
+            JSON.stringify({ to, priority, reply_to: effectiveReplyTo ?? null, reason: err.message }));
+        } catch { /* non-fatal */ }
+        process.exit(1);
+      }
+      throw err;
+    }
     try {
       logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }));
     } catch { /* non-fatal */ }
@@ -1661,6 +1680,18 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
 
+    // Storm guard FIRST. The urgent-signal file is injected by fast-checker on its own,
+    // independent of the bus message, so writing it before checking the guard would let
+    // notify-agent be used to route around a capped thread or an exhausted rate limit —
+    // which is exactly what a capped agent would try next. Guard, then signal.
+    // (2026-08-06 usage spike; see bus/storm-guard.ts.)
+    const verdict = checkSendAllowed(paths, env.agentName, targetAgent);
+    if (!verdict.allowed) {
+      console.error(`REFUSED: ${verdict.reason}`);
+      process.exitCode = 1;
+      return;
+    }
+
     // Write urgent signal file that fast-checker checks on every poll
     const signalDir = join(ctxRoot, 'state', targetAgent);
     mkdirSync(signalDir, { recursive: true });
@@ -1671,10 +1702,19 @@ busCommand
     };
     writeFileSync(join(signalDir, '.urgent-signal'), JSON.stringify(signal));
 
-    // Also send via normal message bus for persistence
+    // Also send via normal message bus for persistence. A guard refusal here would be a
+    // logic error (we just checked), so surface it rather than swallowing — a silent
+    // catch is how the original bypass hid.
     try {
       sendMessage(paths, env.agentName, targetAgent, 'urgent', message);
-    } catch { /* signal already written */ }
+    } catch (err) {
+      if (err instanceof StormGuardError) {
+        console.error(`REFUSED after signal write: ${err.message}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.error(`Signal written but bus persistence failed: ${(err as Error).message}`);
+    }
 
     console.log(`Signal sent to ${targetAgent}`);
   });

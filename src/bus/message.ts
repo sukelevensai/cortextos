@@ -7,6 +7,7 @@ import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { acquireLock, releaseLock } from '../utils/lock.js';
 import { randomString } from '../utils/random.js';
 import { validateAgentName, validatePriority } from '../utils/validate.js';
+import { checkSendAllowed, recordSend, StormGuardError } from './storm-guard.js';
 
 // ---------------------------------------------------------------------------
 // Security (H10): HMAC-SHA256 message signing
@@ -55,10 +56,22 @@ export function sendMessage(
   priority: Priority,
   text: string,
   replyTo?: string,
+  opts?: { noReply?: boolean; bypassGuard?: boolean },
 ): string {
   validateAgentName(from);
   validateAgentName(to);
   validatePriority(priority);
+
+  // Storm guard: refuse runaway agent-to-agent exchanges BEFORE anything is written.
+  // See bus/storm-guard.ts for why this exists (2026-08-06 usage spike).
+  // `bypassGuard` exists only for daemon-internal system traffic; agent-facing paths
+  // must never set it.
+  const verdict = opts?.bypassGuard
+    ? { allowed: true as const, threadRoot: '', depth: 0 }
+    : checkSendAllowed(paths, from, to, replyTo);
+  if (!verdict.allowed) {
+    throw new StormGuardError(verdict);
+  }
 
   const pnum = PRIORITY_MAP[priority];
   const epochMs = Date.now();
@@ -76,6 +89,10 @@ export function sendMessage(
     timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, '.000Z'),
     text,
     reply_to: replyTo || null,
+    // A thread opener is its own root at depth 0; a reply inherits the resolved root.
+    thread_root: verdict.threadRoot || msgId,
+    depth: verdict.depth,
+    ...(opts?.noReply ? { no_reply: true } : {}),
     ...(signingKey ? { sig: hmacSign(signingKey, signPayload(msgId, from, to, text)) } : {}),
   };
 
@@ -83,6 +100,9 @@ export function sendMessage(
   const inboxDir = join(paths.ctxRoot, 'inbox', to);
   ensureDir(inboxDir);
   atomicWriteSync(join(inboxDir, filename), JSON.stringify(message));
+
+  // Count only sends that actually landed, so a refusal never consumes budget.
+  recordSend(paths.ctxRoot, from, to);
 
   return msgId;
 }

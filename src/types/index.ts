@@ -23,6 +23,21 @@ export interface InboxMessage {
   text: string;
   reply_to: string | null;
   sig?: string; // Security (H10): HMAC-SHA256 signature — optional for backwards compat
+  /**
+   * Root message id of this conversation. Absent on pre-2026-08-06 messages and on
+   * thread openers, where the message's own id is the root.
+   */
+  thread_root?: string;
+  /**
+   * How many replies deep this message sits. 0 for a thread opener. Capped by
+   * bus/storm-guard.ts MAX_THREAD_DEPTH — see the 2026-08-06 usage-spike post-mortem.
+   */
+  depth?: number;
+  /**
+   * Sender asserts no reply is wanted. Suppresses the `Reply using:` footer on
+   * injection. Optional and defaults to false, so existing senders are unaffected.
+   */
+  no_reply?: boolean;
 }
 
 // Task Types
