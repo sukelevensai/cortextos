@@ -1688,6 +1688,13 @@ busCommand
     const verdict = checkSendAllowed(paths, env.agentName, targetAgent);
     if (!verdict.allowed) {
       console.error(`REFUSED: ${verdict.reason}`);
+      // Log it on this path too. An agent that has exhausted its send-message budget
+      // reaches for notify-agent next, so an unlogged refusal here is the one the
+      // monitor most needs to see.
+      try {
+        logEvent(paths, env.agentName, env.org, 'message', 'agent_message_refused', 'warning',
+          JSON.stringify({ to: targetAgent, via: 'notify-agent', reason: verdict.reason }));
+      } catch { /* non-fatal */ }
       process.exitCode = 1;
       return;
     }

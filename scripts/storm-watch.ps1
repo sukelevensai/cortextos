@@ -1,5 +1,5 @@
 <#
-storm-watch.ps1 — is the fleet talking to itself again?
+storm-watch.ps1 - is the fleet talking to itself again?
 
 Written 2026-08-06 after an agent-to-agent message storm burned ~80% of a weekly plan
 cap overnight. Answers three questions in one shot:
@@ -67,7 +67,7 @@ if ($msgs.Count -gt 0) {
     # A message written by the new code carries thread_root. One without it was written
     # by an old process, which means the guard is not yet on that path.
     # @() around the filter on purpose: in PS 5.1 a pipeline yielding zero objects has
-    # no .Count at all, so `$x.Count` renders as empty string rather than 0 — which
+    # no .Count at all, so `$x.Count` renders as empty string rather than 0 - which
     # reads as "unknown" when it means "none". Same trap as the wrangler/JSON notes.
     $stamped = @($msgs | Where-Object { $_.Stamped }).Count
     $unstamped = $msgs.Count - $stamped
@@ -82,10 +82,16 @@ if ($msgs.Count -gt 0) {
 }
 
 # Refusals are logged as agent_message_refused events by src/cli/bus.ts.
+# Path is analytics/events/<agent>/<date>.jsonl - NOT logs/. An earlier draft of this
+# script grepped logs/, which does not exist, so it reported 0 refusals unconditionally.
+# A monitor that cannot fail loudly is the same defect that let the 07-30 and 08-03
+# storms pass unnoticed, so the missing-directory case shouts instead of printing 0.
 Write-Host ""
 $refusals = 0
-$logRoot = Join-Path $root 'logs'
-if (Test-Path $logRoot) {
+$logRoot = Join-Path $root 'analytics\events'
+if (-not (Test-Path $logRoot)) {
+    Write-Host "WARNING: no analytics/events under $root - refusal count is UNKNOWN, not zero." -ForegroundColor Red
+} else {
     Get-ChildItem $logRoot -Recurse -Filter '*.jsonl' -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime.ToUniversalTime() -gt $cutoff } |
         ForEach-Object {

@@ -25,6 +25,8 @@ import {
   StormGuardError,
   MAX_THREAD_DEPTH,
   MAX_PAIR_MSGS_PER_HOUR,
+  MAX_FLEET_MSGS_PER_HOUR,
+  MAX_FLEET_MSGS_PER_DAY,
 } from '../../src/bus/storm-guard.js';
 import type { BusPaths, InboxMessage } from '../../src/types/index.js';
 
@@ -175,6 +177,39 @@ describe('per-pair hourly rate limit', () => {
     }
     // alice -> bob is exhausted, but alice -> carol is a different pair and must work.
     expect(() => sendMessage(alice, 'alice', 'carol', 'normal', 'unrelated')).not.toThrow();
+  });
+});
+
+describe('fleet-wide ceilings', () => {
+  it('refuses once the fleet hourly ceiling is reached, across DIFFERENT pairs', () => {
+    // The hole the per-pair cap leaves open: 13 agents is 156 ordered pairs, so
+    // per-pair limits alone permit far more fleet traffic than the storm produced.
+    // Spread the load across many distinct pairs; only a fleet ceiling can see it.
+    let sent = 0;
+    outer: for (let s = 0; s < 40; s++) {
+      const paths = makePaths(`sender${s}`);
+      for (let r = 0; r < 5; r++) {
+        try {
+          sendMessage(paths, `sender${s}`, `recv${r}`, 'normal', 'spread out');
+          sent++;
+        } catch (e) {
+          expect(e).toBeInstanceOf(StormGuardError);
+          expect((e as StormGuardError).message).toMatch(/Fleet rate limit/);
+          break outer;
+        }
+      }
+    }
+    // No single pair ever reached its own cap of 10, so this refusal can only have
+    // come from the fleet ceiling.
+    expect(sent).toBe(MAX_FLEET_MSGS_PER_HOUR);
+  });
+
+  it('sizes the daily ceiling below the unnoticed precursor storms', () => {
+    // 07-30 ran 226 messages/day and 08-03 ran 259, both under any plausible hourly
+    // threshold. Quiet days were 71-101. The daily cap must sit in that gap or it
+    // cannot catch the slow burn, which is the whole reason it exists.
+    expect(MAX_FLEET_MSGS_PER_DAY).toBeGreaterThan(101);
+    expect(MAX_FLEET_MSGS_PER_DAY).toBeLessThan(226);
   });
 });
 
