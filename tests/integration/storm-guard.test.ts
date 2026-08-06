@@ -7,11 +7,21 @@
  * chains with nothing to damp them.
  *
  * The guards under test:
- *   1. thread depth cap  — stops the reply chain
+ *   1. thread depth cap — stops the reply chain
  *   2. per-pair hourly rate limit — stops the obvious evasion, which is to drop
  *      `reply_to` and reopen the same argument as a fresh thread
+ *   3. fleet-wide hourly and daily ceilings — the pair cap bounds one conversation,
+ *      not the fleet; 13 agents is 156 ordered pairs
  *
- * Both must hold, because either alone is trivially routed around.
+ * All three must hold, because each alone is trivially routed around.
+ *
+ * Two things here are deliberately NOT covered by vitest, and are driven against the
+ * built dist/cli.js instead, because in this same file the depth cap once passed its
+ * unit tests while being decoration:
+ *   - the DAILY ceiling mechanism (scripts/verify-daily-ceiling.sh) — its branch sits
+ *     after the hourly branch and is unreachable in-process at the real defaults
+ *   - fail-open under real lock contention, which needs a live OS pid holding the
+ *     mkdir-lock so withFileLockSync actually reaches its timeout and throws
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -205,6 +215,10 @@ describe('fleet-wide ceilings', () => {
   });
 
   it('sizes the daily ceiling below the unnoticed precursor storms', () => {
+    // NOTE: this asserts the CONSTANT only. The mechanism is exercised against the
+    // built CLI with env overrides, because the daily branch sits after the hourly
+    // branch and is unreachable in-process at the real defaults (it would need >200
+    // sends with under 60 in every rolling hour). See scripts/verify-daily-ceiling.sh.
     // 07-30 ran 226 messages/day and 08-03 ran 259, both under any plausible hourly
     // threshold. Quiet days were 71-101. The daily cap must sit in that gap or it
     // cannot catch the slow burn, which is the whole reason it exists.

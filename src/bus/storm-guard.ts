@@ -236,7 +236,20 @@ export function checkSendAllowed(
     };
   }
 
-  const rates = bumpRates(paths.ctxRoot, from, to, false);
+  // FAIL OPEN on a counter-read failure, for the same reason recordSend fails open on a
+  // counter-write failure. withFileLockSync THROWS on acquire timeout (default 5s) and
+  // acquireLock rethrows any non-EEXIST fs error, so with the whole fleet contending on
+  // this one mkdir-lock a lock timeout would otherwise crash a legitimate send — and the
+  // caller in cli/bus.ts rethrows anything that is not a StormGuardError. Introducing a
+  // new silent-loss path inside the fix for a silent-loss incident is not a trade worth
+  // making: the depth cap above has already run, and all that is lost is rate accounting
+  // for this one message.
+  let rates: RateCounts;
+  try {
+    rates = bumpRates(paths.ctxRoot, from, to, false);
+  } catch {
+    return { allowed: true, threadRoot, depth };
+  }
 
   if (rates.pair >= MAX_PAIR_MSGS_PER_HOUR) {
     return {
