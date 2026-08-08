@@ -10,8 +10,8 @@ cap overnight. Answers three questions in one shot:
 
 Read-only. Safe to run any time.
 
-    & 'C:\Users\lukes\cortextos\scripts\storm-watch.ps1'
-    & 'C:\Users\lukes\cortextos\scripts\storm-watch.ps1' -Hours 4
+    & '.\scripts\storm-watch.ps1'
+    & '.\scripts\storm-watch.ps1' -Hours 4
 #>
 
 [CmdletBinding()]

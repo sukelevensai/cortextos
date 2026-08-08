@@ -6,16 +6,16 @@ list running. Written 2026-08-06 during a usage spike: 80% of the weekly cap con
 with the fleet running ~4x its normal turn rate since a 00:34 UTC restart.
 
 USE
-    & 'C:\Users\lukes\cortextos\scripts\fleet-stop-nonessential.ps1'            # dry run
-    & 'C:\Users\lukes\cortextos\scripts\fleet-stop-nonessential.ps1' -Execute   # actually stop
-    & 'C:\Users\lukes\cortextos\scripts\fleet-stop-nonessential.ps1' -Execute -Keep crm-ops,jay
+    & '.\scripts\fleet-stop-nonessential.ps1'            # dry run
+    & '.\scripts\fleet-stop-nonessential.ps1' -Execute   # actually stop
+    & '.\scripts\fleet-stop-nonessential.ps1' -Execute -Keep agent-one,agent-two
 
 WHY THIS SHAPE
   - Uses `cortextos stop <agent>`, the sanctioned CLI, NOT taskkill by name.
-    feedback_leadops-cleanup-incident: never kill by process name machine-wide.
+    A prior incident: killing by process name machine-wide also hits unrelated processes.
   - KEEP list is explicit and printed before anything happens. The PM work-order path
-    must not go down (project_lantern-workorder-silent-loss-2026-07-30 records what a
-    silent outage there costs).
+    must not go down; a prior silent outage on that path recorded what a
+    gap there costs.
   - Dry run is the default. Nothing stops unless -Execute is passed.
   - Does NOT stop the daemon itself, so kept agents keep running and a restart is one
     `cortextos start <agent>` away.
@@ -24,7 +24,7 @@ WHY THIS SHAPE
 [CmdletBinding()]
 param(
     [switch]$Execute,
-    # Confirmed by Luke 2026-08-06: crm-ops IS the PM work-order worker and is the only
+    # Confirmed by the operator 2026-08-06: crm-ops IS the work-order worker and is the only
     # agent that must never go down. Everything else is restartable on demand.
     [string[]]$Keep = @('crm-ops')
 )
