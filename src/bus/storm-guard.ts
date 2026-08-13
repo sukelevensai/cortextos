@@ -232,7 +232,7 @@ export function checkSendAllowed(
         `Thread ${threadRoot} is capped at ${MAX_THREAD_DEPTH} replies and this would be ` +
         `depth ${depth}. Do not restate the point in a new thread — that is the same ` +
         `loop wearing a hat. Either escalate to a human via ` +
-        `\`cortextos bus request-approval\`, or drop it and move on.`,
+        `\`cortextos bus create-approval <title> <category> [context]\`, or drop it and move on.`,
     };
   }
 
