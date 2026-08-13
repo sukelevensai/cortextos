@@ -627,6 +627,19 @@ function readAllTasks(taskDir: string): Task[] {
 }
 
 /**
+ * Is this a task a human has to action?
+ *
+ * Two conventions are in use and both are load-bearing: an explicit `human`/`user`
+ * assignee, and membership of the `human-tasks` project (which is what agents filing
+ * via `create-task --project human-tasks` actually write). Callers MUST use this rather
+ * than re-testing the fields, because the two readers that did drifted apart and the
+ * narrower one silently returned nothing for months - see GAP-0222.
+ */
+export function isHumanTask(task: Task): boolean {
+  return ['human', 'user'].includes(task.assigned_to ?? '') || task.project === 'human-tasks';
+}
+
+/**
  * Check for stale tasks. Matches bash check-stale-tasks.sh behavior.
  */
 export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
@@ -663,12 +676,8 @@ export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
       report.stale_pending.push(task);
     }
 
-    // Human tasks: assigned to "human" or "user", or in human-tasks project
-    if (
-      (['human', 'user'].includes(task.assigned_to ?? '') ||
-        task.project === 'human-tasks') &&
-      createdAge > STALE_HUMAN
-    ) {
+    // Human tasks: assigned to "human"/"user", or in the human-tasks project
+    if (isHumanTask(task) && createdAge > STALE_HUMAN) {
       report.stale_human.push(task);
     }
 
@@ -859,7 +868,10 @@ export function compactTasks(
 }
 
 /**
- * Find stale human-assigned tasks. Matches bash check-human-tasks.sh behavior.
+ * Find stale human tasks (>24h). Shares its predicate with checkStaleTasks via isHumanTask.
+ *
+ * The previous comment here claimed parity with bus/check-human-tasks.sh; that script is a
+ * wrapper that execs this very function, so the claim was circular and pinned nothing.
  */
 export function checkHumanTasks(paths: BusPaths): Task[] {
   const nowEpoch = Math.floor(Date.now() / 1000);
@@ -870,7 +882,7 @@ export function checkHumanTasks(paths: BusPaths): Task[] {
 
   for (const task of tasks) {
     if (task.status === 'completed' || task.status === 'cancelled') continue;
-    if (task.assigned_to !== 'human' && task.assigned_to !== 'user') continue;
+    if (!isHumanTask(task)) continue;
 
     const createdEpoch = Math.floor(new Date(task.created_at).getTime() / 1000);
     const age = nowEpoch - createdEpoch;

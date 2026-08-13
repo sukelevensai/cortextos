@@ -255,5 +255,49 @@ describe('Advanced Task Management', () => {
       const ids = humanTasks.map(t => t.id).sort();
       expect(ids).toEqual(['task_020_020', 'task_021_021']);
     });
+
+    // GAP-0222. checkHumanTasks filtered on assignee alone while checkStaleTasks in the
+    // same file also accepted the human-tasks project. Every task the fleet files uses
+    // the project and an agent assignee, so the command returned [] for months - and an
+    // empty result reads as "nothing stale", which is the reassuring answer. Asserted as
+    // agreement between the two readers, because the divergence was the defect.
+    it('finds project-scoped human tasks, and agrees with checkStaleTasks', () => {
+      createBackdatedTask(paths, {
+        id: 'task_030_030',
+        title: '[HUMAN] Sign up for the thing',
+        status: 'pending',
+        assigned_to: 'agent1', // the fleet convention: filed BY an agent, actioned by a human
+        project: 'human-tasks',
+        created_at: hoursAgo(25),
+        updated_at: hoursAgo(25),
+      });
+      createBackdatedTask(paths, {
+        id: 'task_031_031',
+        title: '[HUMAN] Filed a moment ago',
+        status: 'pending',
+        assigned_to: 'agent1',
+        project: 'human-tasks',
+        created_at: hoursAgo(1),
+        updated_at: hoursAgo(1),
+      });
+      createBackdatedTask(paths, {
+        id: 'task_032_032',
+        title: 'Ordinary agent work',
+        status: 'pending',
+        assigned_to: 'agent1',
+        project: '',
+        created_at: hoursAgo(25),
+        updated_at: hoursAgo(25),
+      });
+
+      const found = checkHumanTasks(paths).map(t => t.id).sort();
+      expect(found).toContain('task_030_030');   // stale + in the project
+      expect(found).not.toContain('task_031_031'); // in the project but under 24h
+      expect(found).not.toContain('task_032_032'); // stale but not a human task
+
+      // the two readers must not drift apart again
+      const viaStale = checkStaleTasks(paths).stale_human.map(t => t.id).sort();
+      expect(viaStale).toEqual(found);
+    });
   });
 });
